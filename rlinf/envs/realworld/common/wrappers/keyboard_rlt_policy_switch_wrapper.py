@@ -23,51 +23,119 @@ from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListe
 
 
 class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
-    """Press ``b`` to enter the RLT critical phase."""
+    """Pedal control for realworld RLT rollouts.
 
+    ``a`` starts an actor-controlled rollout, and ``c`` marks the episode as a
+    success. There is no manual failure key; failures are represented by the
+    outer realworld timeout truncation.
+    """
+
+    IDLE_POLL_S = 0.05
     PEDAL_DEBOUNCE_S = 0.2
+    WAIT_HEARTBEAT_S = 10.0
 
     def __init__(self, env: gym.Env):
         super().__init__(env)
         self.listener = KeyboardListener()
-        self._rlt_switch_flags = False
+        self._running = False
+        self._last_obs: Any = None
         self._last_press_ts: dict[str, float] = {}
 
     @property
     def rlt_switch_flags(self) -> bool:
-        return self._rlt_switch_flags
+        return self._running
 
     def reset(self, *, seed=None, options=None):
-        self._rlt_switch_flags = False
+        self._running = False
         self._last_press_ts.clear()
         self.listener.pop_pressed_keys()
-        return self.env.reset(seed=seed, options=options)
+        obs, info = self.env.reset(seed=seed, options=options)
+        self._last_obs = obs
+
+        self._log_info(
+            "RLT rollout is idle. Arrange the scene, then press pedal 'a' "
+            "to start actor control. Press pedal 'c' during rollout to mark success."
+        )
+        last_heartbeat = time.monotonic()
+        while True:
+            time.sleep(self.IDLE_POLL_S)
+            now = time.monotonic()
+            if now - last_heartbeat >= self.WAIT_HEARTBEAT_S:
+                last_heartbeat = now
+                self._log_info("Still waiting for pedal 'a' to start RLT rollout...")
+            for key in self.listener.pop_pressed_keys():
+                if not self._accept_keypress(key):
+                    continue
+                if key == "a":
+                    self._running = True
+                    self._log_info("Pedal 'a' pressed; starting RLT actor rollout.")
+                    info["rlt_switch_flags"] = True
+                    info["rlt_policy_switch_event"] = "start"
+                    info["rlt_phase"] = "rec"
+                    info["rlt_result"] = None
+                    return obs, info
 
     def step(
         self, action: ActType
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+        if not self._running:
+            for key in self.listener.pop_pressed_keys():
+                if not self._accept_keypress(key):
+                    continue
+                if key == "a":
+                    self._running = True
+                    self._log_info("Pedal 'a' pressed; starting RLT actor rollout.")
+                    return self._idle_response(event="start")
+            return self._idle_response(event=None)
+
         obs, reward, terminated, truncated, info = self.env.step(action)
+        self._last_obs = obs
+
+        # RLT success/failure is manually gated here: only 'c' can produce
+        # reward=1 and termination. Failure is the outer timeout truncation.
+        reward = 0.0
+        terminated = False
+        truncated = False
 
         event: str | None = None
+        result: str | None = None
+        active_for_step = self._running
         for key in self.listener.pop_pressed_keys():
-            now = time.monotonic()
-            if now - self._last_press_ts.get(key, -math.inf) < self.PEDAL_DEBOUNCE_S:
+            if not self._accept_keypress(key):
                 continue
-            self._last_press_ts[key] = now
 
-            if key == "b":
-                if not self._rlt_switch_flags:
-                    event = "enter_actor"
-                    self._rlt_switch_flags = True
-                    self._log_info(
-                        "Pedal 'b' pressed; switching RLT rollout to Stage2 actor."
-                    )
-                else:
-                    event = "actor_already_active"
+            if key == "c":
+                event = "success"
+                result = "success"
+                reward = 1.0
+                terminated = True
+                self._running = False
+                self._log_info("Pedal 'c' pressed; marking RLT rollout success.")
+                break
+            if key == "a":
+                event = "already_running"
 
-        info["rlt_switch_flags"] = self._rlt_switch_flags
+        info["rlt_switch_flags"] = active_for_step
         info["rlt_policy_switch_event"] = event
+        info["rlt_phase"] = "rec" if self._running else "pre"
+        info["rlt_result"] = result
         return obs, reward, terminated, truncated, info
+
+    def _accept_keypress(self, key: str) -> bool:
+        now = time.monotonic()
+        if now - self._last_press_ts.get(key, -math.inf) < self.PEDAL_DEBOUNCE_S:
+            return False
+        self._last_press_ts[key] = now
+        return True
+
+    def _idle_response(self, event: str | None):
+        info = {
+            "rlt_switch_flags": False,
+            "rlt_policy_switch_event": event,
+            "rlt_phase": "pre",
+            "rlt_result": None,
+        }
+        return self._last_obs, 0.0, False, False, info
 
     def _log_info(self, message: str) -> None:
         logger = getattr(self._base_env(), "_logger", None)

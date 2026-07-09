@@ -129,8 +129,14 @@ env:
       use_dense_reward: False
       reward_scale: 1.0
       max_num_steps: 300
-      target_ee_pose: TARGET_EE_POSE
+      target_ee_pose: [0.44215336, -0.09135358, 0.40368369, -3.1149355, -0.00325041, -1.61626836]
+      clip_x_range: 0.20
+      clip_y_range: 0.20
+      clip_z_range_low: 0.20
+      clip_z_range_high: 0.20
+      clip_rz_range: 0.80
       success_hold_steps: 1
+      gripper_type: none
 
   eval:
     rollout_epoch: 1
@@ -151,8 +157,14 @@ env:
       use_dense_reward: False
       reward_scale: 1.0
       max_num_steps: 300
-      target_ee_pose: TARGET_EE_POSE
+      target_ee_pose: [0.413303494, -0.0864179209, 0.403526157, -3.12561071, 0.00134520762, -1.65341905]
+      clip_x_range: 0.20
+      clip_y_range: 0.20
+      clip_z_range_low: 0.20
+      clip_z_range_high: 0.20
+      clip_rz_range: 0.80
       success_hold_steps: 1
+      gripper_type: none
     video_cfg:
       save_video: True
       video_base_dir: ${runner.logger.log_path}/video/eval
