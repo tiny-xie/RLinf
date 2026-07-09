@@ -198,6 +198,8 @@ rollout:
       joint_logprob: True
       use_rlt: True
       rlt_prefix_seq_len: 1024
+      # Must match the Stage1 checkpoint. Options: append_self_attention, cross_attention
+      rlt_encoder_type: "append_self_attention"
       rlt_image_only: False
       rlt_use_mask: True
 
