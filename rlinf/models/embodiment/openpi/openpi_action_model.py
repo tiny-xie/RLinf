@@ -98,6 +98,7 @@ class OpenPi0Config(Pi0Config):
     rlt_num_layers: int = 2
     rlt_num_heads: int = 8
     rlt_mlp_ratio: float = 4.0
+    rlt_encoder_type: str = "append_self_attention"
     rlt_image_only: bool = True
     rlt_use_mask: bool = False
     state_indices: list[int] | None = None
@@ -129,7 +130,10 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         if self.config.noise_method == "flow_noise":
             no_split_modules.append("ExploreNoiseNet")
         if self.config.use_rlt:
-            no_split_modules.append("RLTSelfAttentionLayer")
+            if self.config.rlt_encoder_type == "cross_attention":
+                no_split_modules.append("RLTCrossAttentionLayer")
+            else:
+                no_split_modules.append("RLTSelfAttentionLayer")
         return no_split_modules
 
     @property
@@ -212,6 +216,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 num_layers=self.config.rlt_num_layers,
                 num_heads=self.config.rlt_num_heads,
                 mlp_ratio=self.config.rlt_mlp_ratio,
+                encoder_type=self.config.rlt_encoder_type,
             ).to(dtype=torch.bfloat16)
 
         # ===== DSRL components initialization =====

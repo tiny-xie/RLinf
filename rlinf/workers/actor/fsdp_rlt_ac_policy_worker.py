@@ -39,8 +39,9 @@ class RLTACLossMixin:
     """RLT actor-critic losses on top of RLinf replay-buffer worker plumbing.
 
     Forward types follow the existing off-policy actor-critic API, while the
-    RLT objective disables entropy/alpha and uses a fixed-std actor, min-Q
-    critic target, Q1 actor objective, and BC regularization.
+    RLT objective disables entropy/alpha and uses a fixed-std actor. Critic
+    target Q and actor objective Q are configurable through algorithm.agg_q
+    and algorithm.actor_agg_q.
     """
 
     @staticmethod
@@ -67,21 +68,16 @@ class RLTACLossMixin:
         )
         return ref_chunk[:, :chunk_len].reshape(ref_chunk.shape[0], -1)
 
-    @staticmethod
-    def _require_twin_q(all_q_values: torch.Tensor) -> None:
-        if all_q_values.shape[-1] < 2:
-            raise ValueError(
-                "RLT Stage 2 requires at least two Q heads for twin-Q training, "
-                f"got Q shape {tuple(all_q_values.shape)}."
-            )
-
-    def _min_twin_q(self, all_q_values: torch.Tensor) -> torch.Tensor:
-        self._require_twin_q(all_q_values)
-        return torch.minimum(all_q_values[..., 0:1], all_q_values[..., 1:2])
-
-    def _q1(self, all_q_values: torch.Tensor) -> torch.Tensor:
-        self._require_twin_q(all_q_values)
-        return all_q_values[..., 0:1]
+    def _aggregate_q(self, all_q_values: torch.Tensor, agg_q: str) -> torch.Tensor:
+        if agg_q == "min":
+            return torch.min(all_q_values, dim=-1, keepdim=True)[0]
+        if agg_q == "mean":
+            return torch.mean(all_q_values, dim=-1, keepdim=True)
+        if agg_q == "q1":
+            return all_q_values[..., 0:1]
+        raise NotImplementedError(
+            f"Unsupported RLT Q aggregation {agg_q!r}. Use 'min', 'mean', or 'q1'."
+        )
 
     def _discounted_chunk_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
         rewards = rewards.reshape(rewards.shape[0], -1)
@@ -227,6 +223,7 @@ class RLTACLossMixin:
     def forward_critic(self, batch):
         use_crossq = self.cfg.algorithm.get("q_head_type", "default") == "crossq"
         bootstrap_type = self.cfg.algorithm.get("bootstrap_type", "standard")
+        agg_q = self.cfg.algorithm.get("agg_q", "min")
 
         curr_obs = batch["curr_obs"]
         next_obs = batch["next_obs"]
@@ -252,7 +249,18 @@ class RLTACLossMixin:
                     obs=next_obs,
                     actions=next_actions,
                 )
-                q_next = self._min_twin_q(all_qf_next_target)
+                if self.critic_subsample_size > 0:
+                    sample_idx = torch.randint(
+                        0,
+                        all_qf_next_target.shape[-1],
+                        (self.critic_subsample_size,),
+                        generator=self.critic_sample_generator,
+                        device=self.device,
+                    )
+                    all_qf_next_target = all_qf_next_target.index_select(
+                        dim=-1, index=sample_idx
+                    )
+                q_next = self._aggregate_q(all_qf_next_target, agg_q)
             else:
                 _, all_qf_next = self.model(
                     forward_type=ForwardType.CROSSQ_Q,
@@ -261,7 +269,7 @@ class RLTACLossMixin:
                     next_obs=next_obs,
                     next_actions=next_actions,
                 )
-                q_next = self._min_twin_q(all_qf_next.detach())
+                q_next = self._aggregate_q(all_qf_next.detach(), agg_q)
 
             reward_target = self._discounted_chunk_rewards(rewards)
             reward_horizon = int(rewards.reshape(rewards.shape[0], -1).shape[-1])
@@ -297,6 +305,9 @@ class RLTACLossMixin:
     @Worker.timer("forward_actor")
     def forward_actor(self, batch):
         use_crossq = self.cfg.algorithm.get("q_head_type", "default") == "crossq"
+        agg_q = self.cfg.algorithm.get(
+            "actor_agg_q", self.cfg.algorithm.get("agg_q", "min")
+        )
 
         curr_obs = batch["curr_obs"]
         reference_dropout_prob = float(
@@ -334,7 +345,7 @@ class RLTACLossMixin:
             f"q_value_{q_id}": all_qf_pi[..., q_id].mean().item()
             for q_id in range(num_q_values)
         }
-        qf_pi = self._q1(all_qf_pi)
+        qf_pi = self._aggregate_q(all_qf_pi, agg_q)
         metrics["q_pi"] = qf_pi.mean().item()
 
         ref_chunk = self._ref_chunk(curr_obs)

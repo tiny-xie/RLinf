@@ -62,6 +62,8 @@ actor:
       use_rlt: True
       rlt_alpha: 1.0
       rlt_prefix_seq_len: 1024
+      # Options: append_self_attention, cross_attention
+      rlt_encoder_type: "cross_attention"
       rlt_image_only: False
       rlt_use_mask: True
 
