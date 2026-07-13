@@ -329,13 +329,13 @@ ALIGN_SEQ_STABLE_TICKS = 8  # consecutive frames inside tol → advance
 ALIGN_SEQ_REFRESH_HZ = 10.0
 
 ALIGN_SEQ_HOME_JOINTS_DEFAULT = [
-    math.pi / 4,  # J1: base rotated 45°
-    0.0,  # J2: upper arm vertical
-    0.0,  # J3: no shoulder roll
-    -math.pi / 2,  # J4: elbow at right angle
-    0.0,  # J5: no forearm roll
-    math.pi / 2,  # J6: wrist at right angle
-    0.0,  # J7: no flange roll
+    -0.22,
+    0.09,
+    0.35,
+    -1.62,
+    0.21,
+    2.20,
+    -0.56,
 ]
 
 
@@ -381,10 +381,9 @@ def _print_align_seq_home_pose(home: list[float]) -> None:
         print(f"  J{i + 1} = {_format_angle(v)}")
     print()
     print(
-        "  Geometric intent: J2 vertical, J4 at right angle (forearm\n"
-        "  perpendicular to upper arm), J6 at right angle (wrist 90°\n"
-        "  from forearm), and J1 rotated 45° as an asymmetric reference.\n"
-        "  Override via the ALIGN_HOME env var if you want a different pose."
+        "  Default HOME matches the task joint_reset_qpos used for data\n"
+        "  collection. Override via the ALIGN_HOME env var if you want a\n"
+        "  different pose for this run."
     )
 
 

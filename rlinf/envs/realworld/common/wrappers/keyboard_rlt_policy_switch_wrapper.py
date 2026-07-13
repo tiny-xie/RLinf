@@ -25,9 +25,10 @@ from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListe
 class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
     """Pedal control for realworld RLT rollouts.
 
-    ``a`` starts an actor-controlled rollout, and ``c`` marks the episode as a
-    success. There is no manual failure key; failures are represented by the
-    outer realworld timeout truncation.
+    ``a`` starts an episode under the frozen reference policy, ``b`` switches
+    control to the Stage2 actor, and ``c`` marks the episode as a success.
+    There is no manual failure key; failures are represented by the outer
+    realworld timeout truncation.
     """
 
     IDLE_POLL_S = 0.05
@@ -38,15 +39,19 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
         super().__init__(env)
         self.listener = KeyboardListener()
         self._running = False
+        self._actor_active = False
+        self._awaiting_reset = False
         self._last_obs: Any = None
         self._last_press_ts: dict[str, float] = {}
 
     @property
     def rlt_switch_flags(self) -> bool:
-        return self._running
+        return self._actor_active
 
     def reset(self, *, seed=None, options=None):
         self._running = False
+        self._actor_active = False
+        self._awaiting_reset = False
         self._last_press_ts.clear()
         self.listener.pop_pressed_keys()
         obs, info = self.env.reset(seed=seed, options=options)
@@ -54,7 +59,8 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
 
         self._log_info(
             "RLT rollout is idle. Arrange the scene, then press pedal 'a' "
-            "to start actor control. Press pedal 'c' during rollout to mark success."
+            "to start the episode under reference control. Press pedal 'b' "
+            "to switch to the Stage2 actor. Press pedal 'c' to mark success."
         )
         last_heartbeat = time.monotonic()
         while True:
@@ -68,23 +74,33 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
                     continue
                 if key == "a":
                     self._running = True
-                    self._log_info("Pedal 'a' pressed; starting RLT actor rollout.")
-                    info["rlt_switch_flags"] = True
-                    info["rlt_policy_switch_event"] = "start"
-                    info["rlt_phase"] = "rec"
-                    info["rlt_result"] = None
+                    self._actor_active = False
+                    self._log_info(
+                        "Pedal 'a' pressed; starting RLT episode under reference policy."
+                    )
                     return obs, info
 
     def step(
         self, action: ActType
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         if not self._running:
+            # Idle: hold the robot at the controller's last target. After a
+            # success, ignore pedals until the outer auto-reset calls reset(),
+            # which blocks there waiting for the next 'a'.
+            time.sleep(self.IDLE_POLL_S)
+            if self._awaiting_reset:
+                self.listener.pop_pressed_keys()
+                return self._idle_response(event="awaiting_reset")
+
             for key in self.listener.pop_pressed_keys():
                 if not self._accept_keypress(key):
                     continue
                 if key == "a":
                     self._running = True
-                    self._log_info("Pedal 'a' pressed; starting RLT actor rollout.")
+                    self._actor_active = False
+                    self._log_info(
+                        "Pedal 'a' pressed; starting RLT episode under reference policy."
+                    )
                     return self._idle_response(event="start")
             return self._idle_response(event=None)
 
@@ -99,25 +115,33 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
 
         event: str | None = None
         result: str | None = None
-        active_for_step = self._running
+        accepted_keys: list[str] = []
         for key in self.listener.pop_pressed_keys():
-            if not self._accept_keypress(key):
-                continue
+            if self._accept_keypress(key):
+                accepted_keys.append(key)
 
-            if key == "c":
-                event = "success"
-                result = "success"
-                reward = 1.0
-                terminated = True
-                self._running = False
-                self._log_info("Pedal 'c' pressed; marking RLT rollout success.")
-                break
-            if key == "a":
-                event = "already_running"
+        if "c" in accepted_keys:
+            event = "success"
+            result = "success"
+            reward = 1.0
+            terminated = True
+            self._running = False
+            self._actor_active = False
+            self._awaiting_reset = True
+            self._log_info("Pedal 'c' pressed; marking RLT rollout success.")
+        elif "b" in accepted_keys:
+            if self._actor_active:
+                event = "already_actor"
+            else:
+                event = "actor_start"
+                self._actor_active = True
+                self._log_info("Pedal 'b' pressed; switching RLT rollout to actor.")
+        elif "a" in accepted_keys:
+            event = "already_running"
 
-        info["rlt_switch_flags"] = active_for_step
+        info["rlt_switch_flags"] = self._actor_active
         info["rlt_policy_switch_event"] = event
-        info["rlt_phase"] = "rec" if self._running else "pre"
+        info["rlt_phase"] = self._phase()
         info["rlt_result"] = result
         return obs, reward, terminated, truncated, info
 
@@ -130,12 +154,21 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
 
     def _idle_response(self, event: str | None):
         info = {
-            "rlt_switch_flags": False,
+            "rlt_switch_flags": self._actor_active,
             "rlt_policy_switch_event": event,
-            "rlt_phase": "pre",
+            "rlt_phase": self._phase(),
             "rlt_result": None,
         }
         return self._last_obs, 0.0, False, False, info
+
+    def _phase(self) -> str:
+        if self._awaiting_reset:
+            return "done"
+        if not self._running:
+            return "pre"
+        if self._actor_active:
+            return "actor"
+        return "ref"
 
     def _log_info(self, message: str) -> None:
         logger = getattr(self._base_env(), "_logger", None)
