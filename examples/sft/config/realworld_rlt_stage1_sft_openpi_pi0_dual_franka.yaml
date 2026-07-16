@@ -19,7 +19,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf-rlt
-    experiment_name: "rlt_stage1_sft_pi05_realworld_peg_insertion_state"
+    experiment_name: "rlt_stage1_sft_pi0_realworld_dual_franka_peg_insertion"
     logger_backends: ["tensorboard"]
 
   max_epochs: -1
@@ -40,21 +40,30 @@ actor:
 
   openpi_data:
     # Used as OpenPI's norm-stats asset id. Keep this identical in Stage2.
+    # Pi0 uses z-score normalization, so do not reuse Pi0.5 norm_stats.json.
     repo_id: "dual_franka_peg_insertion_v1"
 
   model:
     model_type: "openpi"
     precision: null
     is_lora: False
-    model_path: "/mnt/public/xietingying/ckpt/rlt-pi05/pi05_base_pytorch"
+    # This must be a converted Pi0 base checkpoint, not a Pi0.5 checkpoint.
+    model_path: "/mnt/public/xietingying/ckpt/rlt-pi0/pi0_base_pytorch"
+    action_dim: 20
     num_action_chunks: 20
     num_steps: 4
+    add_value_head: False
     openpi_data:
       repo_id: ${actor.openpi_data.repo_id}
 
     openpi:
-      config_name: "pi05_dualfranka_tcp_rot6d_state"
-      num_images_in_input: 1
+      # Pi0 consumes state continuously in the action-expert suffix; it does
+      # not use the Pi0.5-only discrete_state_input mode or a *_state config.
+      config_name: "pi0_dualfranka_tcp_rot6d"
+      num_images_in_input: 3
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
       train_expert_only: False
       noise_method: "flow_noise"
       noise_params: [0.16, 0.12, 200]
@@ -64,9 +73,11 @@ actor:
       # Joint SFT objective: loss = rlt_loss + rlt_alpha * vla_loss.
       use_rlt: True
       rlt_alpha: 1.0
+      rlt_input_dim: 2048
+      rlt_embed_dim: 2048
       rlt_prefix_seq_len: 1024
       # Options: append_self_attention, cross_attention. Must match Stage2.
-      rlt_encoder_type: "append_self_attention"
+      rlt_encoder_type: "cross_attention"
       rlt_image_only: False
       rlt_use_mask: True
 
