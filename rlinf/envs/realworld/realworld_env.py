@@ -13,20 +13,16 @@
 # limitations under the License.
 
 import copy
-import os
-import pathlib
-import time
 from functools import partial
 from typing import OrderedDict
 
 import gymnasium as gym
 import numpy as np
-import psutil
 import torch
-from filelock import FileLock
 from omegaconf import OmegaConf
 
 from rlinf.envs.realworld.venv import NoAutoResetSyncVectorEnv
+from rlinf.envs.realworld_setup import setup_realworld
 from rlinf.envs.utils import to_tensor
 from rlinf.scheduler import WorkerInfo
 
@@ -91,19 +87,7 @@ class RealWorldEnv(gym.Env):
 
         This function is called once when the RealWorldEnv class is first imported.
         """
-        # Concurrency control is needed for multiple processes on the same node
-        node_lock_file = "/tmp/.realworld.lock"
-        # Check if the path is valid
-        if not os.path.exists(os.path.dirname(node_lock_file)):
-            node_lock_file = os.path.join(pathlib.Path.home(), ".realworld.lock")
-        node_lock = FileLock(node_lock_file)
-
-        with node_lock:
-            ros_proc_names = ["roscore", "rosmaster", "rosout"]
-            for proc in psutil.process_iter():
-                if proc.name() in ros_proc_names:
-                    proc.kill()
-                    time.sleep(0.5)
+        setup_realworld()
 
     def _init_env(self):
         env_fns = [

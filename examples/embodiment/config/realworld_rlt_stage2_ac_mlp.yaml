@@ -124,6 +124,14 @@ env:
     use_gello: False
     use_pico: False
     no_gripper: False
+    data_collection:
+      enabled: True
+      save_dir: ${runner.logger.log_path}/collected_data
+      export_format: "lerobot"
+      only_success: True
+      robot_type: "panda"
+      fps: 10
+      finalize_interval: 1
     override_cfg:
       is_dummy: False
       use_dense_reward: False

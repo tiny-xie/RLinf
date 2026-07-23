@@ -339,6 +339,42 @@ class CollectEpisode(gym.Wrapper):
             return False
         return bool(np.asarray(env_info[key]).any())
 
+    @staticmethod
+    def _normalize_intervene_in_info(env_info: Any, action_dim: int) -> None:
+        """Reduce a chunk-level intervention payload to its final step.
+
+        ``RealWorldEnv.chunk_step`` flattens intervention actions to
+        ``[chunk_size * action_dim]`` for the training path. Episode collection
+        writes one frame at a time, so the final frame must retain only the
+        final action-sized slice and its matching flag.
+        """
+        if not isinstance(env_info, dict) or "intervene_action" not in env_info:
+            return
+
+        intervene_action = CollectEpisode._to_numpy(env_info["intervene_action"])
+        if intervene_action is None:
+            return
+        intervene_action = intervene_action.reshape(-1)
+        if intervene_action.size <= action_dim:
+            env_info["intervene_action"] = intervene_action[:action_dim]
+            return
+        if intervene_action.size % action_dim != 0:
+            raise ValueError(
+                "Intervention action cannot be split into per-step actions: "
+                f"size={intervene_action.size}, action_dim={action_dim}."
+            )
+
+        chunk_size = intervene_action.size // action_dim
+        env_info["intervene_action"] = intervene_action.reshape(chunk_size, action_dim)[
+            -1
+        ]
+        if "intervene_flag" in env_info:
+            intervene_flag = CollectEpisode._to_numpy(env_info["intervene_flag"])
+            if intervene_flag is not None:
+                env_info["intervene_flag"] = intervene_flag.reshape(chunk_size, -1)[
+                    -1, 0
+                ]
+
     def _record_step(self, action, obs, reward, terminated, truncated, info) -> None:
         """Record one transition into every env's buffer."""
         self._global_step += 1
@@ -352,6 +388,8 @@ class CollectEpisode(gym.Wrapper):
             info_no_reset.pop("final_info")
 
         for env_idx in range(self.num_envs):
+            env_action = self._slice_copy(action, env_idx)
+            action_dim = int(self._to_numpy(env_action).size)
             # Auto-reset envs store the pre-reset obs in info["final_observation"];
             # the current `obs` is the post-reset obs for the *next* episode.
             # Only use final_observation for envs that are actually done this step.
@@ -363,15 +401,14 @@ class CollectEpisode(gym.Wrapper):
                 env_info = self._slice_copy(final_info_batch, env_idx)
                 self._pending_obs[env_idx] = self._slice_copy(obs, env_idx)
                 self._pending_info[env_idx] = self._slice_copy(info_no_reset, env_idx)
-                if "intervene_action" in env_info:
-                    env_info["intervene_action"] = env_info["intervene_action"][-1]
-                    env_info["intervene_flag"] = env_info["intervene_flag"][-1]
             else:
                 env_obs = self._slice_copy(obs, env_idx)
                 env_info = self._slice_copy(info, env_idx)
                 if "final_observation" in env_info:
                     env_info.pop("final_observation")
                     env_info.pop("final_info")
+
+            self._normalize_intervene_in_info(env_info, action_dim)
 
             record_reset = self._bool_from_env_info(env_info, "record_reset")
             pre_record = self._bool_from_env_info(env_info, "pre_record")
@@ -391,7 +428,7 @@ class CollectEpisode(gym.Wrapper):
 
             buf = self._buffers[env_idx]
             buf["observations"].append(env_obs)
-            buf["actions"].append(self._slice_copy(action, env_idx))
+            buf["actions"].append(env_action)
             buf["rewards"].append(self._slice_copy(reward, env_idx))
             buf["terminated"].append(self._slice_copy(terminated, env_idx))
             buf["truncated"].append(self._slice_copy(truncated, env_idx))

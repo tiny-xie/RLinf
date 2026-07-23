@@ -25,10 +25,10 @@ from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListe
 class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
     """Pedal control for realworld RLT rollouts.
 
-    ``a`` starts an episode under the frozen reference policy, ``b`` switches
-    control to the Stage2 actor, and ``c`` marks the episode as a success.
-    There is no manual failure key; failures are represented by the outer
-    realworld timeout truncation.
+    ``a`` starts an episode under the frozen reference policy. While an episode
+    is running, ``a`` marks it as a failure, ``b`` switches control to the
+    Stage2 actor, and ``c`` marks it as a success. Timeout truncation remains a
+    fallback failure path.
     """
 
     IDLE_POLL_S = 0.05
@@ -60,7 +60,8 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
         self._log_info(
             "RLT rollout is idle. Arrange the scene, then press pedal 'a' "
             "to start the episode under reference control. Press pedal 'b' "
-            "to switch to the Stage2 actor. Press pedal 'c' to mark success."
+            "to switch to the Stage2 actor. During the rollout, press pedal "
+            "'a' to mark failure or pedal 'c' to mark success."
         )
         last_heartbeat = time.monotonic()
         while True:
@@ -84,8 +85,8 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
         self, action: ActType
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         if not self._running:
-            # Idle: hold the robot at the controller's last target. After a
-            # success, ignore pedals until the outer auto-reset calls reset(),
+            # Idle: hold the robot at the controller's last target. After an
+            # outcome, ignore pedals until the outer auto-reset calls reset(),
             # which blocks there waiting for the next 'a'.
             time.sleep(self.IDLE_POLL_S)
             if self._awaiting_reset:
@@ -107,8 +108,8 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         self._last_obs = obs
 
-        # RLT success/failure is manually gated here: only 'c' can produce
-        # reward=1 and termination. Failure is the outer timeout truncation.
+        # RLT outcomes are manually gated here: 'c' terminates with success,
+        # while 'a' terminates with failure. Timeout remains a failure fallback.
         reward = 0.0
         terminated = False
         truncated = False
@@ -129,6 +130,17 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
             self._actor_active = False
             self._awaiting_reset = True
             self._log_info("Pedal 'c' pressed; marking RLT rollout success.")
+        elif "a" in accepted_keys:
+            event = "failure"
+            result = "failure"
+            reward = 0.0
+            terminated = True
+            self._running = False
+            self._actor_active = False
+            self._awaiting_reset = True
+            self._log_info(
+                "Pedal 'a' pressed during rollout; marking RLT rollout failure."
+            )
         elif "b" in accepted_keys:
             if self._actor_active:
                 event = "already_actor"
@@ -136,8 +148,6 @@ class KeyboardRLTPolicySwitchWrapper(gym.Wrapper):
                 event = "actor_start"
                 self._actor_active = True
                 self._log_info("Pedal 'b' pressed; switching RLT rollout to actor.")
-        elif "a" in accepted_keys:
-            event = "already_running"
 
         info["rlt_switch_flags"] = self._actor_active
         info["rlt_policy_switch_event"] = event

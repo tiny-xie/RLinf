@@ -17,6 +17,8 @@
 import gc
 from typing import Any
 
+import numpy as np
+
 from rlinf.utils.logging import get_logger
 
 
@@ -193,10 +195,30 @@ class LeRobotDatasetWriter:
         for frame_data in episode_data:
             self.dataset.add_frame(frame_data)
 
+        self._squeeze_singleton_feature_buffer()
         self.dataset.save_episode()
         self.logger.info(
             f"Saved episode with {len(episode_data)} frames, task: '{episode_data[0].get('task', 'N/A')}'"
         )
+
+    def _squeeze_singleton_feature_buffer(self) -> None:
+        """Store ``shape=(1,)`` features as scalars before LeRobot v2.1 saves.
+
+        LeRobot v2.1 validates each frame as a one-element NumPy array, but its
+        Hugging Face schema represents the same feature as a scalar ``Value``.
+        Converting the already-validated episode buffer avoids NumPy 2 scalar
+        conversion errors in ``datasets.Dataset.from_dict``.
+        """
+        episode_buffer = self.dataset.episode_buffer
+        for key, feature in self.dataset.features.items():
+            if tuple(feature.get("shape", ())) != (1,):
+                continue
+            values = episode_buffer.get(key)
+            if not isinstance(values, list) or not values:
+                continue
+            episode_buffer[key] = [
+                np.asarray(value).reshape(-1)[0].item() for value in values
+            ]
 
     def finalize(self) -> None:
         """Finalize the dataset and properly clean up all resources."""
