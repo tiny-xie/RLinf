@@ -398,6 +398,36 @@ Stage 2：运行 RLT Actor-Critic
 控制阶段。其他功能可根据具体任务需求进行定制
 （``rlinf/envs/realworld/common/wrappers/keyboard_rlt_policy_switch_wrapper.py``）。
 
+单独录制 MLP actor 片段
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``env.train.rlt_actor_data_collection`` 可以把实际由 Stage 2 MLP 生成的连续
+action chunk 旁路保存成独立 LeRobot 数据集，同时原
+``env.train.data_collection`` 仍完整录制原来的 rollout，不会修改 replay
+buffer。片段边界使用 rollout 写入的 ``actor_switch``，所以按下 ``b`` 时已经
+生成的 reference chunk 不会被误记为 MLP action。
+
+.. code:: yaml
+
+   env:
+     train:
+       data_collection:
+         enabled: True
+         save_dir: ${runner.logger.log_path}/collected_data
+       rlt_actor_data_collection:
+         enabled: True
+         save_dir: ${runner.logger.log_path}/mlp_actor_segments
+         export_format: "lerobot"
+         only_success: False
+         robot_type: "panda"
+         fps: 10
+         finalize_interval: 1
+         resume: False
+
+两个 ``save_dir`` 必须不同。``only_success=False`` 会同时保留成功和失败
+rollout 中的 MLP 片段；设为 ``True`` 时仅保留最终成功的片段。人工接管帧仍
+携带 ``intervene_flag``，便于后处理时筛选。
+
 运行 ManiSkill Joint 示例
 -------------------------
 

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
+
 import torch
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
@@ -38,6 +40,8 @@ class RLTMLPPolicy(MLPPolicy):
         q_head_type: str = "default",
         fixed_std: float = 0.002,
         actor_std_mode: str = "fixed",
+        actor_hidden_dims: Sequence[int] = (256, 256, 256),
+        critic_hidden_dims: Sequence[int] = (256, 256, 256),
     ):
         if not add_q_head:
             raise ValueError(
@@ -68,6 +72,8 @@ class RLTMLPPolicy(MLPPolicy):
             add_q_head=add_q_head,
             q_head_type=q_head_type,
             critic_obs_dim=critic_obs_dim,
+            actor_hidden_dims=actor_hidden_dims,
+            critic_hidden_dims=critic_hidden_dims,
         )
         self.z_dim = z_dim
         self.proprio_dim = proprio_dim

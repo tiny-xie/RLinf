@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -22,6 +24,23 @@ from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 from rlinf.models.embodiment.modules.q_head import MultiCrossQHead, MultiQHead
 from rlinf.models.embodiment.modules.utils import get_act_func, layer_init
 from rlinf.models.embodiment.modules.value_head import ValueHead
+
+
+def _normalize_hidden_dims(
+    hidden_dims: Sequence[int],
+    *,
+    config_name: str,
+) -> tuple[int, ...]:
+    """Validate and normalize an MLP hidden-dimension configuration."""
+    normalized_dims = tuple(int(dim) for dim in hidden_dims)
+    if not normalized_dims:
+        raise ValueError(f"{config_name} must contain at least one hidden dimension.")
+    if any(dim <= 0 for dim in normalized_dims):
+        raise ValueError(
+            f"{config_name} must contain only positive dimensions, "
+            f"got {normalized_dims}."
+        )
+    return normalized_dims
 
 
 class MLPPolicy(nn.Module, BasePolicy):
@@ -35,12 +54,22 @@ class MLPPolicy(nn.Module, BasePolicy):
         q_head_type="default",
         value_granularity="action_level",
         critic_obs_dim=None,
+        actor_hidden_dims: Sequence[int] = (256, 256, 256),
+        critic_hidden_dims: Sequence[int] = (256, 256, 256),
     ):
         super().__init__()
         self.obs_dim = obs_dim
         self.critic_obs_dim = critic_obs_dim or obs_dim
         self.action_dim = action_dim
         self.num_action_chunks = num_action_chunks
+        self.actor_hidden_dims = _normalize_hidden_dims(
+            actor_hidden_dims,
+            config_name="actor_hidden_dims",
+        )
+        self.critic_hidden_dims = _normalize_hidden_dims(
+            critic_hidden_dims,
+            config_name="critic_hidden_dims",
+        )
         self.torch_compile_enabled = False
         # default setting
         self.independent_std = True
@@ -70,7 +99,7 @@ class MLPPolicy(nn.Module, BasePolicy):
             if q_head_type == "default":
                 self.q_head = MultiQHead(
                     hidden_size=self.critic_obs_dim,
-                    hidden_dims=[256, 256, 256],
+                    hidden_dims=list(self.critic_hidden_dims),
                     num_q_heads=2,
                     output_dim=output_dim,
                     action_feature_dim=action_dim * self.num_action_chunks,
@@ -78,7 +107,7 @@ class MLPPolicy(nn.Module, BasePolicy):
             elif q_head_type == "crossq":
                 self.q_head = MultiCrossQHead(
                     hidden_size=self.critic_obs_dim,
-                    hidden_dims=[256, 256, 256],
+                    hidden_dims=list(self.critic_hidden_dims),
                     num_q_heads=2,
                     output_dim=output_dim,
                     action_feature_dim=action_dim * self.num_action_chunks,
@@ -88,23 +117,33 @@ class MLPPolicy(nn.Module, BasePolicy):
 
         act = get_act_func(activation)
 
-        self.backbone = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 256)),
-            act(),
-            layer_init(nn.Linear(256, 256)),
-            act(),
-            layer_init(nn.Linear(256, 256)),
-            act(),
-        )
+        actor_layers = []
+        actor_dims = (obs_dim, *self.actor_hidden_dims)
+        for input_dim, output_dim in zip(actor_dims[:-1], actor_dims[1:]):
+            actor_layers.extend(
+                [
+                    layer_init(nn.Linear(input_dim, output_dim)),
+                    act(),
+                ]
+            )
+        self.backbone = nn.Sequential(*actor_layers)
+        actor_feature_dim = self.actor_hidden_dims[-1]
         self.actor_mean = layer_init(
-            nn.Linear(256, self.num_action_chunks * action_dim), std=0.01 * np.sqrt(2)
+            nn.Linear(
+                actor_feature_dim,
+                self.num_action_chunks * action_dim,
+            ),
+            std=0.01 * np.sqrt(2),
         )
         if self.independent_std:
             self.actor_logstd = nn.Parameter(
                 torch.ones(1, self.num_action_chunks * action_dim) * -0.5
             )
         else:
-            self.actor_logstd = nn.Linear(256, self.num_action_chunks * action_dim)
+            self.actor_logstd = nn.Linear(
+                actor_feature_dim,
+                self.num_action_chunks * action_dim,
+            )
 
         if action_scale is not None:
             l, h = action_scale

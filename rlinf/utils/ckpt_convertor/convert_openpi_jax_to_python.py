@@ -499,6 +499,20 @@ def slice_initial_orbax_checkpoint(
         f"{checkpoint_dir}/params/", restore_type=np.ndarray, dtype=restore_precision
     )
 
+    # Some Orbax checkpoints wrap the actual model tree in a top-level
+    # ``params`` collection. Normalize both layouts so the conversion below
+    # always sees PaliGemma and the projection layers at the top level.
+    if "PaliGemma" not in params:
+        nested_params = params.get("params")
+        if isinstance(nested_params, dict):
+            params = nested_params
+
+    if "PaliGemma" not in params:
+        raise KeyError(
+            "Could not find 'PaliGemma' in the restored checkpoint. "
+            f"Available top-level keys: {list(params)[:20]}"
+        )
+
     return {
         "paligemma_params": traversals.flatten_mapping(params["PaliGemma"], sep="/"),
         "projection_params": params,

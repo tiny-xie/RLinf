@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from rlinf.envs.wrappers.collect_episode import CollectEpisode
+from rlinf.envs.wrappers.collect_rlt_actor_segments import CollectRLTActorSegments
 from rlinf.envs.wrappers.record_video import RecordVideo
 
-__all__ = ["CollectEpisode", "RecordVideo"]
+__all__ = ["CollectEpisode", "CollectRLTActorSegments", "RecordVideo"]

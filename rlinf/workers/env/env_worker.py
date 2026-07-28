@@ -14,6 +14,7 @@
 
 import asyncio
 import gc
+import pathlib
 from collections import defaultdict
 from typing import Any
 
@@ -413,8 +414,65 @@ class EnvWorker(Worker):
                         env_cfg.data_collection, "finalize_interval", 100
                     ),
                 )
+            actor_collection_cfg = env_cfg.get("rlt_actor_data_collection", None)
+            if actor_collection_cfg and getattr(actor_collection_cfg, "enabled", False):
+                from rlinf.envs.wrappers import CollectRLTActorSegments
+
+                actor_save_dir = str(actor_collection_cfg.save_dir)
+                regular_collection_cfg = env_cfg.get("data_collection", None)
+                if regular_collection_cfg and getattr(
+                    regular_collection_cfg, "enabled", False
+                ):
+                    regular_save_dir = str(regular_collection_cfg.save_dir)
+                    if (
+                        pathlib.Path(actor_save_dir).resolve()
+                        == pathlib.Path(regular_save_dir).resolve()
+                    ):
+                        raise ValueError(
+                            "rlt_actor_data_collection.save_dir must differ from "
+                            "data_collection.save_dir so actor fragments cannot "
+                            "modify the regular rollout dataset."
+                        )
+
+                env = CollectRLTActorSegments(
+                    env,
+                    save_dir=actor_save_dir,
+                    rank=self._rank,
+                    num_envs=num_envs_per_stage,
+                    export_format=getattr(
+                        actor_collection_cfg, "export_format", "lerobot"
+                    ),
+                    robot_type=getattr(actor_collection_cfg, "robot_type", "panda"),
+                    fps=getattr(actor_collection_cfg, "fps", 10),
+                    only_success=getattr(actor_collection_cfg, "only_success", False),
+                    finalize_interval=getattr(
+                        actor_collection_cfg, "finalize_interval", 1
+                    ),
+                    resume=getattr(actor_collection_cfg, "resume", False),
+                )
             env_list.append(env)
         return env_list
+
+    def _set_rlt_actor_chunk_flags(
+        self, stage_id: int, rollout_result: RolloutResult
+    ) -> None:
+        """Forward exact rollout action provenance to the sidecar recorder."""
+        setter = get_env_attr(
+            self.env_list[stage_id], "set_next_actor_chunk_flags", default=None
+        )
+        if not callable(setter):
+            return
+
+        forward_inputs = rollout_result.forward_inputs or {}
+        actor_flags = forward_inputs.get("actor_switch")
+        if actor_flags is None:
+            actor_flags = forward_inputs.get("record_transition")
+        if actor_flags is None:
+            raise RuntimeError(
+                "RLT actor-segment collection is enabled, but rollout did not "
+                "provide forward_inputs['actor_switch'] or ['record_transition']."
+            )
+        setter(actor_flags)
 
     def _init_env(self):
         for i in range(self.stage_num):
@@ -1111,6 +1169,7 @@ class EnvWorker(Worker):
                             cache_current=True,
                         )
 
+                    self._set_rlt_actor_chunk_flags(stage_id, rollout_result)
                     env_output, env_info, chunk_step_payload = self.env_interact_step(
                         rollout_result.actions, stage_id
                     )
