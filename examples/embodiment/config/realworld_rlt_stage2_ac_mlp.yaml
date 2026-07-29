@@ -140,7 +140,7 @@ env:
       export_format: "lerobot"
       # False records both successful and failed actor fragments. Set True to
       # keep only fragments whose parent rollout ends in success.
-      only_success: False
+      only_success: True
       robot_type: "panda"
       fps: 10
       finalize_interval: 1
