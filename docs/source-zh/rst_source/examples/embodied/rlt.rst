@@ -428,6 +428,29 @@ buffer。片段边界使用 rollout 写入的 ``actor_switch``，所以按下 ``
 rollout 中的 MLP 片段；设为 ``True`` 时仅保留最终成功的片段。人工接管帧仍
 携带 ``intervene_flag``，便于后处理时筛选。
 
+逐帧动作对照记录
+~~~~~~~~~~~~~~~~
+
+``env.train.rlt_action_trace_collection`` 会另外写出 JSONL 诊断文件，不改变
+上述两个 LeRobot 数据集或 replay/training 数据。每一行对应一个环境帧，同时
+包含 ``z_rl``、输入 Stage 2 的 ``stage2_state``（即 ``proprio``）、
+``vla_action``、``small_model_action`` 和 ``human_action``。两个候选动作始终保留；
+``actor_active`` 表示该 chunk 是否实际选择了 Stage 2 actor。未发生 SpaceMouse
+接管时，``human_action`` 为 JSON ``null``。
+
+.. code:: yaml
+
+   env:
+     train:
+       rlt_action_trace_collection:
+         enabled: True
+         save_dir: ${runner.logger.log_path}/rlt_action_traces
+         resume: False
+
+单 stage、rank 0 的输出位于
+``rlt_action_traces/rank_0/stage_0/actions.jsonl``。该 ``save_dir`` 必须和原有
+两个数据收集目录不同。
+
 运行 ManiSkill Joint 示例
 -------------------------
 

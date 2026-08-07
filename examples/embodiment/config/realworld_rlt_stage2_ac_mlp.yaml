@@ -145,6 +145,13 @@ env:
       fps: 10
       finalize_interval: 1
       resume: False
+    # Independent JSONL diagnostics. This does not alter either LeRobot dataset
+    # or replay/training data. Every row stores z_rl, the Stage2 proprio state,
+    # VLA and Stage2 candidate actions, plus an optional SpaceMouse action.
+    rlt_action_trace_collection:
+      enabled: True
+      save_dir: ${runner.logger.log_path}/rlt_action_traces
+      resume: False
     override_cfg:
       is_dummy: False
       use_dense_reward: False

@@ -455,6 +455,30 @@ segments from both successful and failed rollouts; set it to ``True`` to retain
 only segments whose parent rollout succeeds. Intervention frames retain their
 ``intervene_flag`` for optional post-processing.
 
+Record per-frame action comparisons
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``env.train.rlt_action_trace_collection`` writes a separate JSONL diagnostic
+without modifying either LeRobot dataset or replay/training data. Every row is
+one environment frame containing ``z_rl``, the Stage2 input
+``stage2_state`` (``proprio``), ``vla_action``, ``small_model_action``, and
+``human_action``. Both candidate actions are always retained;
+``actor_active`` indicates whether the chunk actually selected the Stage 2
+actor. ``human_action`` is JSON ``null`` when SpaceMouse did not intervene.
+
+.. code:: yaml
+
+   env:
+     train:
+       rlt_action_trace_collection:
+         enabled: True
+         save_dir: ${runner.logger.log_path}/rlt_action_traces
+         resume: False
+
+For single-stage rank 0, output is written to
+``rlt_action_traces/rank_0/stage_0/actions.jsonl``. This ``save_dir`` must differ
+from both existing collection directories.
+
 Run the ManiSkill Joint Example
 -------------------------------
 

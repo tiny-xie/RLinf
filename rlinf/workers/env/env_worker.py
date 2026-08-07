@@ -33,6 +33,7 @@ from rlinf.data.embodied_io_struct import (
     Trajectory,
     convert_trajectories_to_batch,
 )
+from rlinf.data.rlt_action_trace_recorder import RLTActionTraceRecorder
 from rlinf.envs import get_env_cls
 from rlinf.envs.action_utils import prepare_actions
 from rlinf.envs.utils import get_env_attr
@@ -67,6 +68,7 @@ class EnvWorker(Worker):
 
         self.env_list = []
         self.eval_env_list = []
+        self.rlt_action_trace_recorders: list[RLTActionTraceRecorder | None] = []
 
         self.last_obs_list = []
         self.last_intervened_info_list = []
@@ -230,6 +232,9 @@ class EnvWorker(Worker):
                 env_cls=train_env_cls,
                 env_cfg=self.cfg.env.train,
                 num_envs_per_stage=self.train_num_envs_per_stage,
+            )
+            self.rlt_action_trace_recorders = self._setup_rlt_action_trace_recorders(
+                self.cfg.env.train
             )
             if self.train_enable_offload:
                 assert all(
@@ -452,6 +457,99 @@ class EnvWorker(Worker):
                 )
             env_list.append(env)
         return env_list
+
+    def _setup_rlt_action_trace_recorders(
+        self, env_cfg: DictConfig
+    ) -> list[RLTActionTraceRecorder | None]:
+        """Build standalone RLT action tracers without changing env wrappers."""
+        trace_cfg = env_cfg.get("rlt_action_trace_collection", None)
+        if not trace_cfg or not getattr(trace_cfg, "enabled", False):
+            return [None] * self.stage_num
+        if env_cfg.env_type != "realworld":
+            raise ValueError(
+                "rlt_action_trace_collection currently supports only realworld envs."
+            )
+
+        trace_save_dir = pathlib.Path(str(trace_cfg.save_dir)).resolve()
+        for collection_name in ("data_collection", "rlt_actor_data_collection"):
+            collection_cfg = env_cfg.get(collection_name, None)
+            if collection_cfg and getattr(collection_cfg, "enabled", False):
+                collection_save_dir = pathlib.Path(
+                    str(collection_cfg.save_dir)
+                ).resolve()
+                if trace_save_dir == collection_save_dir:
+                    raise ValueError(
+                        "rlt_action_trace_collection.save_dir must differ from "
+                        f"{collection_name}.save_dir."
+                    )
+
+        return [
+            RLTActionTraceRecorder(
+                save_dir=str(trace_cfg.save_dir),
+                rank=self._rank,
+                stage_id=stage_id,
+                num_envs=self.train_num_envs_per_stage,
+                action_dim=int(self.model_cfg.action_dim),
+                resume=getattr(trace_cfg, "resume", False),
+            )
+            for stage_id in range(self.stage_num)
+        ]
+
+    def _record_rlt_action_trace(
+        self,
+        stage_id: int,
+        rollout_result: RolloutResult,
+        env_output: EnvOutput,
+    ) -> None:
+        """Record action candidates through a side channel after env execution."""
+        if not self.rlt_action_trace_recorders:
+            return
+        recorder = self.rlt_action_trace_recorders[stage_id]
+        if recorder is None:
+            return
+
+        forward_inputs = rollout_result.forward_inputs or {}
+        z_rl = forward_inputs.get("z_rl")
+        stage2_state = forward_inputs.get("proprio")
+        vla_actions = forward_inputs.get("ref_chunk")
+        small_model_actions = forward_inputs.get("model_action")
+        actor_switch = forward_inputs.get("actor_switch")
+        if actor_switch is None:
+            actor_switch = forward_inputs.get("record_transition")
+        missing = [
+            name
+            for name, value in (
+                ("z_rl", z_rl),
+                ("proprio", stage2_state),
+                ("ref_chunk", vla_actions),
+                ("model_action", small_model_actions),
+                ("actor_switch", actor_switch),
+            )
+            if value is None
+        ]
+        if missing:
+            raise RuntimeError(
+                "RLT action trace collection is enabled, but rollout is missing "
+                f"forward_inputs fields: {missing}."
+            )
+
+        recorder.record_chunk(
+            z_rl=z_rl,
+            stage2_state=stage2_state,
+            vla_actions=vla_actions,
+            small_model_actions=small_model_actions,
+            actor_switch=actor_switch,
+            human_actions=env_output.intervene_actions,
+            human_flags=env_output.intervene_flags,
+            terminations=env_output.terminations,
+            truncations=env_output.truncations,
+        )
+
+    def close_rlt_action_trace_recorders(self) -> None:
+        """Flush and close every standalone RLT action trace recorder."""
+        for recorder in self.rlt_action_trace_recorders:
+            if recorder is not None:
+                recorder.close()
 
     def _set_rlt_actor_chunk_flags(
         self, stage_id: int, rollout_result: RolloutResult
@@ -1173,6 +1271,7 @@ class EnvWorker(Worker):
                     env_output, env_info, chunk_step_payload = self.env_interact_step(
                         rollout_result.actions, stage_id
                     )
+                    self._record_rlt_action_trace(stage_id, rollout_result, env_output)
                     stage_rollout = self.rollout_results[stage_id]
                     if isinstance(stage_rollout, EmbodiedLerobotRolloutResult):
                         stage_rollout.append_chunk_episode_data(
