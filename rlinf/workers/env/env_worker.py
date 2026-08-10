@@ -22,7 +22,11 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from rlinf.algorithms.registry import calculate_adv_and_returns
-from rlinf.algorithms.rlt.transition import update_rlt_transitions
+from rlinf.algorithms.rlt.replay import RLTEnvReplaySession
+from rlinf.algorithms.rlt.transition import (
+    get_rlt_replay_stride,
+    update_rlt_transitions,
+)
 from rlinf.data.embodied_io_struct import (
     ChunkStepResult,
     EmbodiedLerobotRolloutResult,
@@ -78,6 +82,7 @@ class EnvWorker(Worker):
         self.enable_rlt = (
             OmegaConf.select(self.cfg, "algorithm.loss_type", default="") == "rlt_ac"
         )
+        self.rlt_window_stride = get_rlt_replay_stride(self.cfg)
 
         self.reward_mode = self.cfg.get("reward", {}).get("reward_mode", "per_step")
         self.history_reward_assign = self.cfg.get("reward", {}).get(
@@ -1024,8 +1029,22 @@ class EnvWorker(Worker):
         )
         env_metrics = defaultdict(list)
         rlt_pending_obs: list[dict[str, Any] | None] = [None] * self.stage_num
+        rlt_replay_session = (
+            RLTEnvReplaySession(
+                stage_num=self.stage_num,
+                chunk_len=int(self.model_cfg.num_action_chunks),
+                action_dim=int(self.model_cfg.action_dim),
+                stride=self.rlt_window_stride,
+                max_episode_length=int(self.cfg.env.train.max_episode_steps),
+                use_training_pipeline=self.use_training_pipeline,
+            )
+            if self.rlt_window_stride is not None
+            else None
+        )
 
         for epoch in range(self.rollout_epoch):
+            if rlt_replay_session is not None:
+                rlt_replay_session.start_epoch()
             if epoch == 0 and self._prefetched_train_bootstrap is not None:
                 env_outputs = self._prefetched_train_bootstrap
                 self._prefetched_train_bootstrap = None
@@ -1071,6 +1090,13 @@ class EnvWorker(Worker):
                     rewards = self.compute_bootstrap_rewards(
                         env_output, rollout_result.bootstrap_values, reward_model_output
                     )
+                    if rlt_replay_session is not None:
+                        rlt_replay_session.process_boundary(
+                            stage_id=stage_id,
+                            env_output=env_output,
+                            rollout_result=rollout_result,
+                            rewards=rewards,
+                        )
                     chunk_step_result = ChunkStepResult(
                         actions=rollout_result.forward_inputs.get("action", None),
                         prev_logprobs=(
@@ -1104,7 +1130,11 @@ class EnvWorker(Worker):
                         ].mark_last_step_with_intervene_flags(
                             rollout_result.intervene_flags
                         )
-                    if self.enable_rlt and self.collect_transitions:
+                    if (
+                        self.enable_rlt
+                        and self.collect_transitions
+                        and rlt_replay_session is None
+                    ):
                         update_rlt_transitions(
                             stage_id,
                             rlt_pending_obs,
@@ -1123,6 +1153,12 @@ class EnvWorker(Worker):
                         stage_rollout.append_chunk_episode_data(
                             rollout_result=rollout_result,
                             **chunk_step_payload,
+                        )
+                    if rlt_replay_session is not None:
+                        rlt_replay_session.record_executed_chunk(
+                            stage_id=stage_id,
+                            rollout_result=rollout_result,
+                            chunk_step_payload=chunk_step_payload,
                         )
                     env_batch = env_output.to_dict()
                     self.send_to(
@@ -1188,6 +1224,13 @@ class EnvWorker(Worker):
                 rewards = self.compute_bootstrap_rewards(
                     env_output, rollout_result.bootstrap_values, reward_model_output
                 )
+                if rlt_replay_session is not None:
+                    rlt_replay_session.process_boundary(
+                        stage_id=stage_id,
+                        env_output=env_output,
+                        rollout_result=rollout_result,
+                        rewards=rewards,
+                    )
                 chunk_step_result = ChunkStepResult(
                     actions=rollout_result.forward_inputs.get("action", None),
                     prev_logprobs=(
@@ -1212,7 +1255,11 @@ class EnvWorker(Worker):
                     and reward_model_output is not None
                 ):
                     self.assign_history_reward(stage_id, reward_model_output)
-                if self.enable_rlt and self.collect_transitions:
+                if (
+                    self.enable_rlt
+                    and self.collect_transitions
+                    and rlt_replay_session is None
+                ):
                     update_rlt_transitions(
                         stage_id,
                         rlt_pending_obs,
@@ -1222,6 +1269,15 @@ class EnvWorker(Worker):
                         intervene_actions=env_output.intervene_actions,
                         intervene_flags=env_output.intervene_flags,
                     )
+
+            if rlt_replay_session is not None:
+                rlt_replay_session.exchange_replay(
+                    worker=self,
+                    group_name=self.cfg.rollout.group_name,
+                    request_channel=rollout_channel,
+                    result_channel=input_channel,
+                    live_results=self.rollout_results,
+                )
 
             if self.use_training_pipeline and actor_channel is not None:
                 await self.send_rollout_trajectories_pipeline(
@@ -1233,6 +1289,11 @@ class EnvWorker(Worker):
 
             self.store_last_obs_and_intervened_info(env_outputs)
             self.finish_rollout()
+
+        if rlt_replay_session is not None:
+            self.rollout_results = rlt_replay_session.final_results(
+                self.rollout_results
+            )
 
         if not self.use_training_pipeline and actor_channel is not None:
             if self.enable_online_lerobot:

@@ -23,6 +23,20 @@ RLT_OBS_KEYS = ("z_rl", "proprio", "ref_chunk")
 RLT_TRANSITION_PREFIX = "rlt_transition_"
 
 
+def get_rlt_replay_stride(cfg: Any) -> int | None:
+    """Return the configured frame stride for overlapping RLT chunks."""
+    replay_cfg = cfg.algorithm.get("replay_buffer", {}) or {}
+    configured_stride = replay_cfg.get("rlt_window_stride")
+    if configured_stride is None:
+        return None
+    stride = int(configured_stride)
+    if stride <= 0:
+        raise ValueError(
+            f"algorithm.replay_buffer.rlt_window_stride must be > 0, got {stride}."
+        )
+    return stride
+
+
 def use_simulator_transition_replay(cfg: Any) -> bool:
     """Return True for envs that store one replay row per env step."""
     train_env_cfg = cfg.env.get("train", None)
@@ -80,6 +94,8 @@ def update_rlt_transitions(
             human_actions = intervene_actions.reshape(batch_size, flags.shape[1], -1)
             action_dim = human_actions.shape[-1]
             ref_actions = ref_chunk.reshape(batch_size, -1, action_dim).clone()
+            # Both tensors are anchored at the current frame, so intervention
+            # frame i replaces reference frame i in the executed prefix.
             ref_actions[:, : flags.shape[1]] = torch.where(
                 flags,
                 human_actions.to(device=ref_chunk.device, dtype=ref_chunk.dtype),

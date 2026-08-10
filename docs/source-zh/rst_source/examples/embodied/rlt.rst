@@ -264,6 +264,11 @@ Stage 2 中比较关键的字段：
        num_action_chunks: 10
        ref_num_action_chunks: 20
 
+   algorithm:
+     replay_buffer:
+       rlt_window_stride: 2
+       rlt_feature_batch_size: 4
+
    env:
      train:
        keyboard_reward_wrapper: rlt_policy_switch
@@ -277,6 +282,23 @@ Stage 2 的 actor loss 为：
 普通 policy step 中，BC target 是 VLA reference action。如果某一步存了
 human intervention action，那么这一步的 BC target 会切换成人类动作。ManiSkill
 默认关闭 ``expert_takeover``，因此默认路线只使用 VLA reference 和 actor action。
+
+真机 Stage 2 中，``rlt_window_stride`` 表示 replay 滑窗在控制帧上的间隔。
+原论文设置是学习长度为 10 帧的 chunk（``num_action_chunks: 10``），每 2 帧
+构造一个样本（``rlt_window_stride: 2``）。切换前执行完整 VLA reference chunk
+（例如 ``ref_num_action_chunks: 20``），切换后执行小模型的 10 帧 chunk；replay
+不受这两个执行边界限制，仍在连续控制帧上以 0、2、4……为起点构造 10 帧窗口。
+滑窗会同步移动 action、reward、raw observation 和逐帧接管标记。真机交互结束后，
+replay builder 会去重窗口端点，再使用冻结的 Stage 1 模型批量回填 RLT 特征；
+该过程不位于在线动作推理路径中。
+人类动作会改写相同位置的 reference 前缀。``rlt_window_stride`` 必须是正整数；
+``rlt_feature_batch_size`` 用于限制 rollout 结束后 Stage 1 特征回填的
+micro-batch 大小。
+VLA reference horizon 不是 replay 的分段边界：连续 rollout 会跨过 VLA 的
+重新规划边界，继续按 ``0、2、4……`` 取窗口；只有 episode terminal 或明确的
+不连续区间才会截断滑窗。
+当前 post-rollout 路径面向论文的单真机设置，要求一个 train env、一个 pipeline
+stage、一个 rollout worker，并关闭 decoupled env mode。
 
 运行当前 Franka 示例
 --------------------

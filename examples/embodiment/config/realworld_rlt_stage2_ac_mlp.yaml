@@ -97,6 +97,10 @@ algorithm:
     min_buffer_size: 2
     sample_window_size: 200
     auto_save: False
+    # Original RLT: learn 10-frame overlapping chunks every 2 control frames.
+    rlt_window_stride: 2
+    # Bound Stage 1 memory during post-rollout replay feature backfill.
+    rlt_feature_batch_size: 4
 
   target_update_freq: 1
   target_update_type: all

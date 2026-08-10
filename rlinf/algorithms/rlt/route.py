@@ -127,21 +127,26 @@ class RealworldRLTRoute(RLTRoute):
         ref_actions = result["forward_inputs"]["ref_chunk"].to(
             device=actions.device, dtype=actions.dtype
         )
-        routed_actions = torch.where(
+
+        actor_switch = rlt_switch_flags[:, 0, 0]
+        # The real-robot path has one env: VLA keeps its full reference horizon,
+        # while the lightweight actor executes its shorter learned horizon.
+        routed_actions = actions if bool(actor_switch.all()) else ref_actions
+
+        # Learner inputs stay fixed at the actor horizon for tensor stacking.
+        training_actions = torch.where(
             rlt_switch_flags,
             actions,
-            ref_actions[:, : actions.shape[1], : actions.shape[2]],
+            ref_actions[:, : actions.shape[1]],
+        )
+        result["forward_inputs"]["action"] = training_actions.reshape(
+            training_actions.shape[0], -1
         ).contiguous()
-        result["forward_inputs"]["action"] = routed_actions.reshape(
-            routed_actions.shape[0], -1
-        ).contiguous()
-        result["forward_inputs"]["record_transition"] = rlt_switch_flags.reshape(
-            actions.shape[0], -1
-        )[:, :1].to(torch.bool)
+        result["forward_inputs"]["record_transition"] = actor_switch[:, None]
         result["forward_inputs"]["actor_switch"] = result["forward_inputs"][
             "record_transition"
         ]
-        return RLTRouteOutput(actions=routed_actions, result=result)
+        return RLTRouteOutput(actions=routed_actions.contiguous(), result=result)
 
 
 class SimulatorRLTRoute(RLTRoute):

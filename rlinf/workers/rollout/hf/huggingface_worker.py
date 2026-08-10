@@ -28,6 +28,8 @@ from rlinf.algorithms.rlt import (
     build_rlt_route,
     predict_rlt_actions,
 )
+from rlinf.algorithms.rlt.replay import serve_rlt_replay_requests
+from rlinf.algorithms.rlt.transition import get_rlt_replay_stride
 from rlinf.config import SupportedModel
 from rlinf.data.embodied_io_struct import (
     RolloutResult,
@@ -81,6 +83,7 @@ class MultiStepRolloutWorker(Worker):
         self.expert_model = None
         self.rlt_feature_model = None
         self.rlt_route = None
+        self.rlt_window_stride = get_rlt_replay_stride(self.cfg)
 
         self.total_num_train_envs = (
             cfg.env.train.total_num_envs if self.enable_train else 0
@@ -755,6 +758,18 @@ class MultiStepRolloutWorker(Worker):
                 async_op=True,
                 batch_size=self.train_batch_size,
                 split_fn=self._split_rollout_result,
+            )
+
+        if self.rlt_window_stride is not None:
+            replay_cfg = self.cfg.algorithm.get("replay_buffer", {}) or {}
+            await serve_rlt_replay_requests(
+                worker=self,
+                group_name=self.cfg.env.group_name,
+                input_channel=input_channel,
+                output_channel=output_channel,
+                feature_model=self.rlt_feature_model,
+                feature_batch_size=int(replay_cfg.get("rlt_feature_batch_size", 4)),
+                stage_num=self.num_pipeline_stages,
             )
 
     @Worker.timer("rollout/generate")

@@ -284,6 +284,11 @@ Important Stage 2 fields:
        num_action_chunks: 10
        ref_num_action_chunks: 20
 
+   algorithm:
+     replay_buffer:
+       rlt_window_stride: 2
+       rlt_feature_batch_size: 4
+
    env:
      train:
        keyboard_reward_wrapper: rlt_policy_switch
@@ -298,6 +303,28 @@ The BC target is the VLA reference action for normal policy steps. If a human
 intervention action is stored for a step, the BC target for that step becomes
 the human action. ManiSkill disables ``expert_takeover`` by default, so the
 default simulated route uses only the VLA reference and actor actions.
+
+For real-robot Stage 2, ``rlt_window_stride`` controls overlapping replay
+windows in control frames. The paper setting is a 10-frame learned chunk
+(``num_action_chunks: 10``) sampled every 2 frames
+(``rlt_window_stride: 2``). Before takeover, the robot executes the complete
+VLA reference chunk (for example, ``ref_num_action_chunks: 20``); after
+takeover, it executes the lightweight actor's 10-frame chunk. Replay is not
+limited by either execution boundary and still builds 10-frame windows at
+starts 0, 2, 4, and so on over the continuous control trace. The window's
+actions, rewards, raw observations, and frame-rate intervention flags are
+shifted together. After robot interaction finishes, the replay builder
+deduplicates window anchors and asks the frozen Stage 1 model to backfill their
+RLT features in batches. This work is not part of the online action-inference
+path. Human actions replace the matching leading reference frames.
+``rlt_window_stride`` must be a positive integer.
+``rlt_feature_batch_size`` bounds the post-rollout Stage 1 micro-batch.
+The VLA reference horizon is not a replay boundary: for a continuous rollout,
+stride-2 starts continue as ``0, 2, 4, ...`` across VLA replanning boundaries.
+Windows stop only at episode terminals or explicitly discontinuous segments.
+This post-rollout path currently targets the paper's single-robot setup and
+requires one train env, one pipeline stage, one rollout worker, and coupled env
+mode.
 
 Run the Provided Franka Example
 -------------------------------
