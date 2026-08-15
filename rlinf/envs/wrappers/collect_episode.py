@@ -236,7 +236,7 @@ class CollectEpisode(gym.Wrapper):
         self._maybe_flush(terminated, truncated)
         return obs, reward, terminated, truncated, info
 
-    def chunk_step(self, chunk_actions, smooth_intervene_mode: bool = False):
+    def chunk_step(self, chunk_actions):
         """Execute a chunk of actions, recording each sub-step individually.
 
         Both pickle and lerobot formats receive step-level records for maximum
@@ -245,15 +245,12 @@ class CollectEpisode(gym.Wrapper):
         Args:
             chunk_actions: Action chunk, typically a tensor of shape
                 ``[num_envs, chunk_size, action_dim]``.
-            smooth_intervene_mode: Whether an intervention wrapper should hold
-                human control while policy inference is bypassed.
 
         Returns:
             Tuple of (obs_list, rewards, terminations, truncations, infos_list).
         """
         obs_list, rewards, terminations, truncations, infos_list = self.env.chunk_step(
-            chunk_actions,
-            smooth_intervene_mode=smooth_intervene_mode,
+            chunk_actions
         )
 
         chunk_size = len(obs_list) if isinstance(obs_list, (list, tuple)) else 1
@@ -573,7 +570,7 @@ class CollectEpisode(gym.Wrapper):
 
     def _ensure_lerobot_writer(self, ep_data: dict):
         """Get-or-create the LeRobot writer. Must be called under ``_lerobot_lock``."""
-        from rlinf.data.lerobot_writer import LeRobotDatasetWriter
+        from rlinf.data.storage.lerobot import LeRobotDatasetWriter
 
         if self._lerobot_writer is None:
             self._lerobot_writer = LeRobotDatasetWriter()
@@ -609,7 +606,9 @@ class CollectEpisode(gym.Wrapper):
         """Return ``{key: (H, W, C)}`` for all frame keys matching *prefix*.
 
         Matches both the bare ``prefix`` (e.g. ``wrist_image``) and indexed
-        variants (``wrist_image/0``, ``wrist_image/1``, …).
+        variants (``wrist_image-0``, ``wrist_image-1``, …). The separator is a
+        hyphen, not ``/``: lerobot >= 0.3 rejects feature names containing
+        ``/`` in ``LeRobotDatasetMetadata.create``.
         """
         return {
             k: tuple(frame[k].shape)

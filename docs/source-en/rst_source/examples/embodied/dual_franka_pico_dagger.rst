@@ -2,11 +2,13 @@
 
 Dual Franka PICO Collection and DAgger
 ======================================
-.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/franka_arm_small.jpg
+
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/dual-franka-vr.jpg
    :align: center
    :width: 80%
+   :alt: Dual-Franka VR teleoperation
 
-   In dual-Franka real-world tasks, PICO can be used for two-hand teleoperation collection and online HG-DAgger intervention.
+   Collect dual-Franka teleoperation data with VR / PICO.
 
 This guide explains how to use PICO to collect demonstrations in the dual-Franka
 TCP-rot6d environment, then run online Human-Gated DAgger with PICO human
@@ -67,7 +69,7 @@ Tasks
      - Collect tcp_rot6d LeRobot data with two-hand PICO teleoperation.
    * - HG-DAgger
      - ``realworld_dual_franka_dagger_openpi``
-     - Let the policy act autonomously with per-arm PICO intervention, and add complete successful trajectories to the online LeRobot dataset.
+     - Let the policy act autonomously with per-arm PICO intervention, archive complete successful trajectories, and train on fully intervened action chunks.
 
 Observation and Action
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -295,6 +297,7 @@ and right PICO controllers bind to the left and right robot arms.
    env:
      train:
        smooth_intervene: True
+       use_spacemouse: False
        use_pico: True
        pico:
          zmq_addr: "tcp://<vr_publisher_ip>:<port>"
@@ -338,8 +341,9 @@ to ``intervene_action`` is:
 The reverse applies when only the right arm is being intervened on. Replacing
 either arm sets ``intervene_flag=True``; no intervention record is produced only
 when neither arm is being intervened on. The online LeRobot collector still
-stores the complete successful episode, and ``intervene_flag`` identifies the
-human-correction frames within it.
+stores the complete successful episode. With ``only_save_expert: True``, the
+sampler uses ``intervene_flag`` to expose only action chunks whose non-padded
+frames are all human corrections.
 
 
 Start the PICO Data Stream
@@ -459,7 +463,7 @@ Before launch, confirm these fields:
 
    algorithm:
      dagger:
-       only_save_expert: False
+       only_save_expert: True
        online_lerobot:
          enabled: True
          only_success: True
@@ -473,6 +477,8 @@ Before launch, confirm these fields:
 
    env:
      train:
+       smooth_intervene: True
+       use_spacemouse: False
        use_pico: True
        keyboard_reward_wrapper: eval_control
        pico:
@@ -480,13 +486,14 @@ Before launch, confirm these fields:
          hand: "dual"
          hold_current_when_inactive: False
      eval:
+       use_spacemouse: False
        use_pico: False
 
 ``online_lerobot.enabled: True`` enables the online LeRobot data path. The env worker collects rollouts by episode and sends episodes that satisfy the configured filters to the actor; the actor adds them to ``RollingLeRobotDataset`` for training, so online training no longer uses the trajectory replay buffer.
 
-``smooth_intervene: True`` removes action-chunk boundary stalls while PICO is active. If the final frame of a chunk is human-controlled, the env worker skips the next policy inference and executes a shape-compatible dummy chunk instead. PICO actions still override active arms, while inactive frames hold the measured TCP pose. Normal model inference resumes after the final chunk frame is no longer intervened or the episode ends. This mode currently requires one environment per env-worker pipeline stage.
+``smooth_intervene: True`` removes action-chunk boundary stalls while PICO is active. If the final frame of a chunk is human-controlled, the env worker skips the next policy inference and executes a shape-compatible dummy chunk instead. PICO actions still override active arms, while inactive frames hold the measured TCP pose. Normal model inference resumes after the final chunk frame is no longer intervened or the episode ends. This mode is PICO-only (``use_pico: True``, ``use_spacemouse: False``) and currently requires one environment per env-worker pipeline stage.
 
-``only_success: True`` discards failed rollouts and keeps only successful episodes. ``only_save_expert: False`` trains on the complete successful episode rather than only PICO intervention frames. Every successful episode is archived immediately under ``${runner.logger.log_path}/online_lerobot/rank_0/id_<N>/``. ``env.eval.use_pico: False`` means evaluation uses the policy alone, without human intervention.
+``only_success: True`` discards failed rollouts and keeps only successful episodes. ``only_save_expert: True`` still archives each complete successful episode, but training only samples chunk starts where every non-padded frame in the action chunk has ``intervene_flag=True``. Because a dual-arm frame is marked as an intervention when either arm is replaced, such a chunk may combine one arm's PICO action with the other arm's rollout action. Every successful episode is archived immediately under ``${runner.logger.log_path}/online_lerobot/rank_0/id_<N>/``. ``env.eval.use_pico: False`` means evaluation uses the policy alone, without human intervention.
 
 The real-world DAgger config intentionally omits beta-related fields because it does not configure ``rollout.expert_model``. Beta only controls action mixing between a model expert and the student; human intervention here is determined by the PICO intervention wrapper.
 
@@ -513,7 +520,8 @@ it to let the policy continue. Holding either ``grip`` combines that arm's PICO
 action with the other arm's rollout action into a complete 20D
 ``info["intervene_action"]``. After a successful termination, the complete
 episode is sent in memory to the actor and written as an online LeRobot shard;
-failed episodes are discarded.
+failed episodes are discarded. The actor retains the complete physical archive
+but exposes only fully intervention-labeled chunks to training.
 
 Monitoring
 ----------
@@ -526,10 +534,10 @@ Start TensorBoard:
 
 Recommended metrics:
 
-* ``train/dagger/actor_loss``: supervised loss on complete successful trajectories.
+* ``train/dagger/actor_loss``: supervised loss on expert-only action chunks.
 * ``train/lerobot_dataset/total_episodes``: number of successful episodes received by the actor.
 * ``train/lerobot_dataset/physical_frames``: number of received LeRobot physical frames.
-* ``train/lerobot_dataset/logical_samples``: number of trainable samples in the rolling window.
+* ``train/lerobot_dataset/logical_samples``: number of expert-valid trainable chunk starts in the rolling window.
 * ``train/lerobot_dataset/num_sub_datasets``: number of currently loaded LeRobot shards.
 * ``train/actor/lr`` and ``train/actor/grad_norm``: training stability.
 
