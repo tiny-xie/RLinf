@@ -1187,12 +1187,6 @@ class EnvWorker(Worker):
                     # Emulated observation latency: wait before the obs goes out,
                     # without blocking the other coroutines in this worker.
                     await self._maybe_wait_env_delay(stage_id)
-                    stage_builder = self.trajectory_builders[stage_id]
-                    if isinstance(stage_builder, EmbodiedLerobotTrajectoryBuilder):
-                        stage_builder.append_chunk_episode_data(
-                            policy_output=policy_output,
-                            **chunk_step_payload,
-                        )
                     env_batch = env_output.to_dict()
                     skip_rollout_send = self.smooth_intervene.on_chunk_done(
                         stage_id,
@@ -1209,6 +1203,16 @@ class EnvWorker(Worker):
                             route_key=stage_id if not self.env_decoupled_mode else None,
                             decoupled_mode=self.env_decoupled_mode,
                         )
+                    # Start the next inference before packing the just-finished
+                    # chunk into LeRobot frames. The rollout runs in another worker,
+                    # so its receive/predict path overlaps this local CPU work.
+                    stage_builder = self.trajectory_builders[stage_id]
+                    if isinstance(stage_builder, EmbodiedLerobotTrajectoryBuilder):
+                        with self.worker_timer("append_lerobot_chunk"):
+                            stage_builder.append_chunk_episode_data(
+                                policy_output=policy_output,
+                                **chunk_step_payload,
+                            )
                     if (
                         get_env_attr(self.env_list[stage_id], "insert_delay_metrics")
                         is not None

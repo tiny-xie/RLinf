@@ -57,6 +57,8 @@ cluster:
 
 runner:
   task_type: embodied
+  # Reduce rollout stalls from synchronizing after every actor update.
+  weight_sync_interval: 30
   logger:
     log_path: "../results"
     project_name: dual-franka-openpi
@@ -180,6 +182,10 @@ rollout:
   pipeline_stage_num: 1
   collect_transitions: False
   collect_prev_infos: False
+  # The control node reconstructs online LeRobot frames from env-side data, so it
+  # only needs the executable action chunk from rollout. This avoids returning
+  # diffusion chains, tokens, and cloned observations over the control channel.
+  action_only_output: True
   sync_weight_nccl_max_ctas: 32
   model:
     # SFT ckpt expected layout:
@@ -191,6 +197,9 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
+  # Apply requested weight updates in the rollout worker without blocking the
+  # runner; overlapping requests are coalesced while a sync is in progress.
+  sync_weight_no_wait: True
   micro_batch_size: 1
   global_batch_size: 1
   seed: 1234

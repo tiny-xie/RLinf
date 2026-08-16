@@ -113,6 +113,9 @@ class MultiStepRolloutWorker(Worker):
                 // self.model_cfg.num_action_chunks
             )
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
+        self.action_only_output = self.cfg.rollout.get("action_only_output", False)
+        if self.action_only_output:
+            self._validate_action_only_output()
         self.version = 0
         self.finished_episodes = None
 
@@ -135,6 +138,38 @@ class MultiStepRolloutWorker(Worker):
                 "rollout_results": [],
             }
         self.rollout_queue_size = self.cfg.rollout.get("rollout_queue_size", 0)
+
+    def _validate_action_only_output(self) -> None:
+        """Validate that the env does not need training fields on its control path."""
+        online_lerobot = bool(
+            OmegaConf.select(
+                self.cfg,
+                "algorithm.dagger.online_lerobot.enabled",
+                default=False,
+            )
+        )
+        if not self.enable_dagger or not online_lerobot:
+            raise ValueError(
+                "rollout.action_only_output requires embodied DAgger with "
+                "algorithm.dagger.online_lerobot.enabled=true. The replay-buffer "
+                "DAgger path needs forward_inputs from PolicyOutput."
+            )
+        if self.collect_transitions or self.collect_prev_infos:
+            raise ValueError(
+                "rollout.action_only_output requires rollout.collect_transitions=false "
+                "and rollout.collect_prev_infos=false."
+            )
+        if self.enable_opd or OmegaConf.select(
+            self.cfg, "rollout.rlt_feature_model", default=None
+        ) is not None:
+            raise ValueError(
+                "rollout.action_only_output is incompatible with OPD and RLT outputs."
+            )
+        if self.cfg.rollout.get("expert_model", None) is not None:
+            raise ValueError(
+                "rollout.action_only_output does not support rollout.expert_model, "
+                "because expert labels and flags must be returned to the env."
+            )
 
     def init_worker(self):
         rollout_model_config = copy.deepcopy(self.model_cfg)
@@ -582,6 +617,12 @@ class MultiStepRolloutWorker(Worker):
         *,
         final_obs: dict[str, Any] | None = None,
     ) -> PolicyOutput:
+        if self.action_only_output:
+            # Keep the standard envelope for channel routing, but transfer only the
+            # action chunk needed by the control node. Online LeRobot reconstructs
+            # training frames from env observations and executed/intervened actions.
+            return PolicyOutput(actions=actions)
+
         intervene_flags = result.get("intervene_flags")
         if (
             intervene_flags is None
@@ -728,7 +769,9 @@ class MultiStepRolloutWorker(Worker):
                 intervene_requested=env_output.get("intervene_flags", None),
             )
 
-            if self.enable_opd:
+            if self.action_only_output:
+                policy_output = PolicyOutput(actions=actions)
+            elif self.enable_opd:
                 # OPD keeps this path separate to retain student action tokens for post-rollout teacher logprobs.
                 policy_output = self._build_policy_output(
                     actions,

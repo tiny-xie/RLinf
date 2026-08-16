@@ -215,6 +215,22 @@ def test_policy_output_split_merge_invariant():
     assert torch.equal(merged.versions, policy_output.versions)
 
 
+def test_action_only_policy_output_contains_only_control_payload():
+    worker = object.__new__(MultiStepRolloutWorker)
+    worker.action_only_output = True
+    actions = torch.arange(24, dtype=torch.float32).view(2, 3, 4)
+
+    policy_output = worker._build_policy_output(actions, {})
+
+    assert torch.equal(policy_output.actions, actions)
+    assert policy_output.prev_logprobs is None
+    assert policy_output.prev_values is None
+    assert policy_output.bootstrap_values is None
+    assert policy_output.intervene_flags is None
+    assert policy_output.forward_inputs == {}
+    assert policy_output.versions is None
+
+
 def test_merge_env_outputs_with_partial_optional_fields():
     env_output_0 = EnvOutput(
         obs=_make_obs(0, 2),
