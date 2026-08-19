@@ -216,28 +216,6 @@ class RoboTwinEnv(gym.Env):
         else:
             return reward
 
-    def _cal_chunk_rewards(self, step_reward, chunk_step, terminations, infos):
-        n_steps_to_run = np.array(
-            [[0] for i in range(self.num_envs)]
-        )  # infos.get("n_steps_to_run", np.array([[0] for i in range(self.num_envs)]))
-
-        n_steps_to_run = torch.as_tensor(
-            np.array(n_steps_to_run).reshape(-1), device=self.device
-        )
-        chunk_rewards = torch.zeros(self.num_envs, chunk_step, device=self.device)
-        for env_id in range(self.num_envs):
-            steps_left = n_steps_to_run[env_id]
-            reward = step_reward[env_id]
-            start_idx = chunk_step - steps_left - 1
-
-            if terminations[env_id] and start_idx > 0:
-                if self.use_rel_reward:
-                    chunk_rewards[env_id, start_idx] = reward
-                else:
-                    chunk_rewards[env_id, start_idx:] = reward
-
-        return chunk_rewards
-
     def reset(
         self,
         env_idx: Optional[Union[int, list[int]]] = None,
@@ -320,68 +298,53 @@ class RoboTwinEnv(gym.Env):
         return extracted_obs, step_reward, terminations, truncations, infos
 
     def chunk_step(self, chunk_actions):
-        if isinstance(chunk_actions, torch.Tensor):
-            chunk_actions = chunk_actions.cpu().numpy()
+        """Execute an action chunk while retaining every frame-level transition.
 
+        RoboTwin accepts an action horizon but returns only the observation after
+        the complete horizon. Online LeRobot DAgger needs one observation for
+        every action, so execute one-action horizons through :meth:`step` and
+        aggregate their outputs here.
+        """
         # chunk_actions: [num_envs, chunk_step, action_dim]
-        num_envs = chunk_actions.shape[0]
-        chunk_step = chunk_actions.shape[1]
+        chunk_size = chunk_actions.shape[1]
         obs_list = []
         infos_list = []
 
-        raw_obs, step_reward, terminations, truncations, info_list = self.venv.step(
-            chunk_actions
-        )
-        extracted_obs = self._extract_obs_image(raw_obs)
-        infos = list_of_dict_to_dict_of_list(info_list)
-        obs_list.append(extracted_obs)
-        infos_list.append(infos)
-        if isinstance(terminations, list):
-            terminations = torch.as_tensor(
-                np.array(terminations).reshape(-1), device=self.device
+        chunk_rewards = []
+        raw_chunk_terminations = []
+        raw_chunk_truncations = []
+        for step_idx in range(chunk_size):
+            actions = chunk_actions[:, step_idx]
+            extracted_obs, step_reward, terminations, truncations, infos = self.step(
+                actions, auto_reset=False
             )
-        if isinstance(truncations, list):
-            truncations = torch.as_tensor(
-                np.array(truncations).reshape(-1), device=self.device
-            )
+            obs_list.append(extracted_obs)
+            infos_list.append(infos)
+            chunk_rewards.append(step_reward)
+            raw_chunk_terminations.append(terminations)
+            raw_chunk_truncations.append(truncations)
 
-        if self.use_custom_reward:
-            step_reward = self._calc_step_reward(terminations)
-        else:
-            if isinstance(step_reward, list):
-                step_reward = torch.as_tensor(
-                    np.array(step_reward, dtype=np.float32).reshape(-1),
-                    device=self.device,
-                )
+        chunk_rewards = torch.stack(chunk_rewards, dim=1)
+        raw_chunk_terminations = torch.stack(raw_chunk_terminations, dim=1).bool()
+        raw_chunk_truncations = torch.stack(raw_chunk_truncations, dim=1).bool()
 
-        chunk_rewards = self._cal_chunk_rewards(
-            step_reward, chunk_step, terminations, infos
-        )
-
-        self._elapsed_steps += chunk_actions.shape[1]
-        truncated = self._elapsed_steps >= self.cfg.max_episode_steps
-        if truncated.any():
-            truncations = torch.logical_or(truncated, truncations)
-
-        infos = self._record_metrics(step_reward, infos)
-
-        if self.ignore_terminations:
-            terminations[:] = False
-            if self.record_metrics:
-                if "success" in infos:
-                    infos["episode"]["success_at_end"] = infos["success"].clone()
-
-        past_dones = torch.logical_or(terminations, truncations)
+        past_terminations = raw_chunk_terminations.any(dim=1)
+        past_truncations = raw_chunk_truncations.any(dim=1)
+        past_dones = torch.logical_or(past_terminations, past_truncations)
         if past_dones.any() and self.auto_reset:
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones, obs_list[-1], infos_list[-1]
             )
 
-        chunk_terminations = torch.zeros((num_envs, chunk_step), dtype=bool)
-        chunk_terminations[:, -1] = terminations
+        if self.auto_reset or self.ignore_terminations:
+            chunk_terminations = torch.zeros_like(raw_chunk_terminations)
+            chunk_terminations[:, -1] = past_terminations
 
-        chunk_truncations = torch.zeros((num_envs, chunk_step), dtype=bool)
-        chunk_truncations[:, -1] = truncations
+            chunk_truncations = torch.zeros_like(raw_chunk_truncations)
+            chunk_truncations[:, -1] = past_truncations
+        else:
+            chunk_terminations = raw_chunk_terminations
+            chunk_truncations = raw_chunk_truncations
 
         return (
             obs_list,

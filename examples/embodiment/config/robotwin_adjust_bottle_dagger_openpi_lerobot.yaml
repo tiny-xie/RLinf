@@ -25,7 +25,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "robotwin_adjust_bottle_dagger_openpi"
+    experiment_name: "robotwin_adjust_bottle_dagger_openpi_lerobot"
     logger_backends: ["tensorboard"]
 
   max_epochs: 8000
@@ -48,6 +48,20 @@ algorithm:
     beta_decay: 0.99
     # False enables classic DAgger: student-acted data is re-labeled by expert.
     only_save_expert: False
+    online_lerobot:
+      enabled: True
+      only_success: True
+      robot_type: "aloha"
+      fps: 10
+      finalize_interval: 8
+      data_path: ${runner.logger.log_path}/physical-intelligence/robotwin
+      rolling_lerobot_window_size: 50000
+      enable_decoded_cache: true
+      decoded_cache_capacity: 25000
+      cache_ingest_mode: new_shards
+      cache_last_n_frames: 25000
+      cache_ingest_max_frames: null
+      lerobot_num_workers: 0
 
   gamma: 0.99
 
@@ -67,6 +81,7 @@ env:
   # enable_offload: False
   train:
     rollout_epoch: 1
+    auto_reset: True
     total_num_envs: 64
     reward_coef: ${algorithm.reward_coef}
     max_episode_steps: 200

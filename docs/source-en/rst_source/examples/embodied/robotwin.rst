@@ -242,8 +242,8 @@ Pick one recipe and launch training:
      - ``examples/embodiment/config/robotwin_adjust_bottle_ppo_openpi_pi05.yaml``
      - ``robotwin_adjust_bottle_ppo_openpi_pi05``
    * - OpenPI + DAgger
-     - ``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi.yaml``
-     - ``robotwin_adjust_bottle_dagger_openpi``
+     - ``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi_lerobot.yaml``
+     - ``robotwin_adjust_bottle_dagger_openpi_lerobot``
    * - Lingbot-VLA + GRPO
      - ``examples/embodiment/config/robotwin_click_bell_grpo_lingbotvla.yaml``
      - ``robotwin_click_bell_grpo_lingbotvla``

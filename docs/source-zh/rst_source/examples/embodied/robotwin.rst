@@ -238,8 +238,8 @@ RoboTwin 支持 46 个操作任务。RLinf 提供了以下 ready-to-run 环境�
      - ``examples/embodiment/config/robotwin_adjust_bottle_ppo_openpi_pi05.yaml``
      - ``robotwin_adjust_bottle_ppo_openpi_pi05``
    * - OpenPI + DAgger
-     - ``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi.yaml``
-     - ``robotwin_adjust_bottle_dagger_openpi``
+     - ``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi_lerobot.yaml``
+     - ``robotwin_adjust_bottle_dagger_openpi_lerobot``
    * - Lingbot-VLA + GRPO
      - ``examples/embodiment/config/robotwin_click_bell_grpo_lingbotvla.yaml``
      - ``robotwin_click_bell_grpo_lingbotvla``

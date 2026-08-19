@@ -63,8 +63,8 @@ Supported Configurations
      - LIBERO-Spatial
      - ``libero_spatial_dagger_openpi.yaml``
    * - π₀
-     - RoboTwin (adjust-bottle)
-     - ``robotwin_adjust_bottle_dagger_openpi.yaml``
+     - RoboTwin (adjust-bottle, online LeRobot)
+     - ``robotwin_adjust_bottle_dagger_openpi_lerobot.yaml``
    * - π₀
      - LIBERO-Spatial (online LeRobot)
      - ``libero_spatial_dagger_openpi_lerobot.yaml``
@@ -102,10 +102,11 @@ Online LeRobot DAgger
 ---------------------
 
 The classic configs above store expert-labeled trajectories in an in-memory
-**replay buffer**. ``libero_spatial_dagger_openpi_lerobot.yaml`` adds an
-**online LeRobot** path: the env worker collects completed episodes in LeRobot
-format, sends them to the actor in memory, and the actor trains from a rolling
-window via :class:`~rlinf.data.datasets.dagger.RollingLeRobotDataset`.
+**replay buffer**. ``libero_spatial_dagger_openpi_lerobot.yaml`` and
+``robotwin_adjust_bottle_dagger_openpi_lerobot.yaml`` use an **online LeRobot** path:
+the env worker collects completed episodes in LeRobot format, sends them to the
+actor in memory, and the actor trains from a rolling window via
+:class:`~rlinf.data.datasets.dagger.RollingLeRobotDataset`.
 
 **Classic replay buffer vs online LeRobot**
 
@@ -301,7 +302,7 @@ We currently support DAgger training with the following configs:
 - **MLP + ManiSkill**: ``examples/embodiment/config/maniskill_dagger_mlp.yaml``
 - **Pi0 + LIBERO**: ``examples/embodiment/config/libero_spatial_dagger_openpi.yaml``
 - **Pi0 + LIBERO (online LeRobot)**: ``examples/embodiment/config/libero_spatial_dagger_openpi_lerobot.yaml``
-- **Pi0 + RoboTwin**: ``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi.yaml``
+- **Pi0 + RoboTwin**: ``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi_lerobot.yaml``
 
 **2. Key DAgger Parameters**
 
@@ -360,9 +361,7 @@ Use the same config name with either launcher:
    bash examples/embodiment/run_embodiment.sh maniskill_dagger_mlp
    bash examples/embodiment/run_embodiment.sh libero_spatial_dagger_openpi
    bash examples/embodiment/run_embodiment.sh libero_spatial_dagger_openpi_lerobot
-   bash examples/embodiment/run_embodiment.sh robotwin_adjust_bottle_dagger_openpi
-   # For RoboTwin, add the following two commands before running the .sh file:
-   # export ROBOT_PLATFORM=ALOHA export ROBOTWIN_PATH=/path/to/RoboTwin
+   bash examples/embodiment/run_embodiment.sh robotwin_adjust_bottle_dagger_openpi_lerobot
 
 **Async Mode**
 
@@ -371,9 +370,7 @@ Use the same config name with either launcher:
    bash examples/embodiment/run_async.sh maniskill_dagger_mlp
    bash examples/embodiment/run_async.sh libero_spatial_dagger_openpi
    bash examples/embodiment/run_async.sh libero_spatial_dagger_openpi_lerobot
-   bash examples/embodiment/run_async.sh robotwin_adjust_bottle_dagger_openpi
-   # For RoboTwin, add the following two commands before running the .sh file:
-   # export ROBOT_PLATFORM=ALOHA export ROBOTWIN_PATH=/path/to/RoboTwin
+   bash examples/embodiment/run_async.sh robotwin_adjust_bottle_dagger_openpi_lerobot
 
 Visualization and Visualization and Results
 -------------------------------------------

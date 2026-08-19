@@ -62,8 +62,8 @@ DAgger 微调具身策略：学生策略与环境交互，专家对访问到的�
      - LIBERO-Spatial
      - ``libero_spatial_dagger_openpi.yaml``
    * - π₀
-     - RoboTwin（adjust-bottle）
-     - ``robotwin_adjust_bottle_dagger_openpi.yaml``
+     - RoboTwin（adjust-bottle，在线 LeRobot）
+     - ``robotwin_adjust_bottle_dagger_openpi_lerobot.yaml``
    * - π₀
      - LIBERO-Spatial（在线 LeRobot）
      - ``libero_spatial_dagger_openpi_lerobot.yaml``
@@ -97,9 +97,10 @@ DAgger 工作原理
 在线 LeRobot DAgger
 ----------------------------------------
 
-上面三份经典配置将 expert 标注轨迹存入内存 **replay buffer**。
-``libero_spatial_dagger_openpi_lerobot.yaml`` 提供 **在线 LeRobot** 路径：env worker
-以 LeRobot 格式收集完整 episode，经内存发送给 actor，actor 通过
+经典配置将 expert 标注轨迹存入内存 **replay buffer**。
+``libero_spatial_dagger_openpi_lerobot.yaml`` 和
+``robotwin_adjust_bottle_dagger_openpi_lerobot.yaml`` 使用 **在线 LeRobot** 路径：env
+worker 以 LeRobot 格式收集完整 episode，经内存发送给 actor，actor 通过
 :class:`~rlinf.data.datasets.dagger.RollingLeRobotDataset` 滑动窗口训练。
 
 **经典 replay buffer vs 在线 LeRobot**
@@ -282,7 +283,7 @@ Pi0 DAgger 配置使用单独的学生模型与专家模型路径：
 - **MLP + ManiSkill**：``examples/embodiment/config/maniskill_dagger_mlp.yaml``
 - **Pi0 + LIBERO**：``examples/embodiment/config/libero_spatial_dagger_openpi.yaml``
 - **Pi0 + LIBERO（在线 LeRobot）**：``examples/embodiment/config/libero_spatial_dagger_openpi_lerobot.yaml``
-- **Pi0 + RoboTwin**：``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi.yaml``
+- **Pi0 + RoboTwin**：``examples/embodiment/config/robotwin_adjust_bottle_dagger_openpi_lerobot.yaml``
 
 **2. DAgger 关键参数**
 
@@ -340,9 +341,7 @@ Pi0 DAgger 配置使用单独的学生模型与专家模型路径：
    bash examples/embodiment/run_embodiment.sh maniskill_dagger_mlp
    bash examples/embodiment/run_embodiment.sh libero_spatial_dagger_openpi
    bash examples/embodiment/run_embodiment.sh libero_spatial_dagger_openpi_lerobot
-   bash examples/embodiment/run_embodiment.sh robotwin_adjust_bottle_dagger_openpi
-   # For RoboTwin, add the following two commands before running the .sh file:
-   # export ROBOT_PLATFORM=ALOHA export ROBOTWIN_PATH=/path/to/RoboTwin
+   bash examples/embodiment/run_embodiment.sh robotwin_adjust_bottle_dagger_openpi_lerobot
 
 **异步模式**
 
@@ -351,9 +350,7 @@ Pi0 DAgger 配置使用单独的学生模型与专家模型路径：
    bash examples/embodiment/run_async.sh maniskill_dagger_mlp
    bash examples/embodiment/run_async.sh libero_spatial_dagger_openpi
    bash examples/embodiment/run_async.sh libero_spatial_dagger_openpi_lerobot
-   bash examples/embodiment/run_async.sh robotwin_adjust_bottle_dagger_openpi
-   # For RoboTwin, add the following two commands before running the .sh file:
-   # export ROBOT_PLATFORM=ALOHA export ROBOTWIN_PATH=/path/to/RoboTwin
+   bash examples/embodiment/run_async.sh robotwin_adjust_bottle_dagger_openpi_lerobot
 
 可视化与结果
 ----------------------------------------
