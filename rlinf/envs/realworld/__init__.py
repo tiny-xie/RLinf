@@ -30,6 +30,13 @@ from .gim_arm import tasks as gim_arm_tasks
 from .realworld_env import RealWorldEnv
 from .xsquare import Turtle2Env, Turtle2RobotConfig, Turtle2RobotState
 from .xsquare import tasks as xsquare_tasks
+from .yam import (
+    DualYamJointEnv,
+    DualYamJointEnvConfig,
+    DualYamLeaderIntervention,
+    YamControlRuntime,
+)
+from .yam import tasks as yam_tasks
 
 RealWorldEnv.realworld_setup()
 
@@ -55,5 +62,10 @@ __all__ = [
     "Turtle2RobotConfig",
     "Turtle2RobotState",
     "xsquare_tasks",
+    "DualYamJointEnv",
+    "DualYamJointEnvConfig",
+    "DualYamLeaderIntervention",
+    "YamControlRuntime",
+    "yam_tasks",
     "RealWorldEnv",
 ]

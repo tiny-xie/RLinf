@@ -1,7 +1,7 @@
 真实机器人强化学习
 ========================================
 
-当你的出发点是真实机器人硬件时，请使用本节。如果你使用 Franka 机械臂或 Franka-based rig，请从 Franka 开始；GimArm、XSquare Turtle2 和 Dexmal DOS-W1 请进入对应机器人页面。
+当你的出发点是真实机器人硬件时，请使用本节。如果你使用 Franka 机械臂或 Franka-based rig，请从 Franka 开始；YAM、GimArm、XSquare Turtle2 和 Dexmal DOS-W1 请进入对应机器人页面。
 
 每个章节都给出遥操作、数据采集、Sim-to-Real 迁移、部署或在线 RL 所需的配置路径。
 
@@ -17,6 +17,17 @@
            <b>Single-Arm Franka</b>
          </a><br>
          进入 Single-Arm Franka 章节，查看基础真机 RL、reward model、ZED + Robotiq、GELLO、VR / PICO、双臂、灵巧手、Pi0 SFT 和 HG-DAgger
+       </p>
+     </div>
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/yam.html" style="display: block; text-decoration: none;">
+         <div style="width: 100%; height: 200px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); background: linear-gradient(135deg, #173a5e, #45a4a0); color: white; display: flex; align-items: center; justify-content: center; font-size: 42px; font-weight: 700; letter-spacing: 4px;">YAM</div>
+       </a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/yam.html" style="text-decoration: underline; color: blue;">
+           <b>双臂 YAM</b>
+         </a><br>
+         配置一套 RLinf 原生工作站，将 14 维主从臂示教直接采集为 LeRobot 数据
        </p>
      </div>
       <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
@@ -68,6 +79,7 @@
 
    Single-Arm Franka <embodied/franka_index>
    Dual-Arm Franka <embodied/dual_franka_index>
+   双臂 YAM <embodied/yam>
    GimArm <embodied/gim_arm>
    XSquare Turtle2 <embodied/xsquare_turtle2>
    DOS-W1 <embodied/dosw1>

@@ -25,6 +25,9 @@ from .robots import (
     DOSW1HWInfo,
     DualFrankaConfig,
     DualFrankaHWInfo,
+    DualYamConfig,
+    DualYamHWInfo,
+    DualYamRobot,
     FrankaConfig,
     FrankaHWInfo,
     GimArmConfig,
@@ -32,6 +35,8 @@ from .robots import (
     RobotAutoConfig,
     Turtle2Config,
     Turtle2HWInfo,
+    YamCameraConfig,
+    YamDeviceConfig,
 )
 
 __all__ = [
@@ -48,6 +53,9 @@ __all__ = [
     "DOSW1HWInfo",
     "DualFrankaConfig",
     "DualFrankaHWInfo",
+    "DualYamConfig",
+    "DualYamHWInfo",
+    "DualYamRobot",
     "FrankaConfig",
     "FrankaHWInfo",
     "GimArmConfig",
@@ -55,4 +63,6 @@ __all__ = [
     "RobotAutoConfig",
     "Turtle2Config",
     "Turtle2HWInfo",
+    "YamCameraConfig",
+    "YamDeviceConfig",
 ]

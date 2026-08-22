@@ -29,6 +29,7 @@ RLinf 是一个灵活且可扩展的开源框架，专为具身智能和智能�
 </div>
 
 ## 最新动态
+- [2026/08] 🔥 RLinf 新增原生双臂 YAM 遥操作与 LeRobot 直接数据采集，不再依赖单独的 YAM 应用仓库。文档：[双臂 YAM](docs/source-zh/rst_source/examples/embodied/yam.rst)。
 - [2026/08] 🔥 RLinf 集成 Diffusion-NFT，支持 SD3 和 Wan2.2 视频生成模型的强化学习。文档：[视频生成模型的强化学习](docs/source-zh/rst_source/examples/video_models.rst)。
 - [2026/08] 🔥 RLinf 正式支持三款新的加速卡：摩尔线程（MUSA）、华为昇腾（CANN）与 AMD（ROCm）。文档：[摩尔线程 MUSA](https://rlinf.readthedocs.io/zh-cn/latest/rst_source/guides/moore_threads_musa.html)、[华为昇腾 CANN](https://rlinf.readthedocs.io/zh-cn/latest/rst_source/guides/ascend_cann.html)、[AMD ROCm](https://rlinf.readthedocs.io/zh-cn/latest/rst_source/guides/amd_rocm.html)。
 - [2026/08] 🔥 RLinf 支持 Moonlight-16B-A3B（DeepSeek-V3 MLA + MoE）的 GRPO 训练。文档：[Moonlight-16B GRPO](https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/agentic/math_reasoning/moonlight.html)。
@@ -257,6 +258,7 @@ RLinf 支持 World Action Model（WAM）和 Vision-Language-Action Model（VLA�
           <li><a href="https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/embodied/xsquare_turtle2.html">XSquare Turtle2</a> ✅</li>
           <li><a href="https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/embodied/dosw1.html">DOS-W1</a> ✅</li>
           <li><a href="https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/embodied/gim_arm.html">GimArm</a> ✅</li>
+          <li><a href="https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/embodied/yam.html">双臂 YAM 数据采集</a> ✅</li>
           <li>More...</li>
         </ul>
       </td>
@@ -276,7 +278,12 @@ RLinf 支持 World Action Model（WAM）和 Vision-Language-Action Model（VLA�
             <a href="https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/embodied/franka_vr.html">
               PICO VR
             </a> ✅
-          </li>          
+          </li>
+          <li>
+            <a href="https://rlinf.readthedocs.io/zh-cn/latest/rst_source/examples/embodied/yam.html">
+              YAM 主臂示教
+            </a> ✅
+          </li>
         </ul>
       </td>
     </tr>

@@ -1,0 +1,8 @@
+# YAM hardware environment. Keep the SDK pinned because the RLinf adapter relies
+# on the v1.3.3 constructor and control-mode contract.
+i2rt @ git+https://github.com/i2rt-robotics/i2rt.git@47fee5e7dec4e30ca054f798bda1c8894b465ed2
+
+# Camera and configuration dependencies used by the native RLinf YAM runtime.
+opencv-python
+pyrealsense2; sys_platform == "linux" and platform_machine == "x86_64"
+pyyaml>=6.0

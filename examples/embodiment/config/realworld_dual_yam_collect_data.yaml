@@ -1,0 +1,159 @@
+defaults:
+  - env/realworld_dual_yam_joint@env.eval
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: yam
+      placement: 0
+  node_groups:
+    - label: yam
+      node_ranks: 0
+      hardware:
+        type: DualYam
+        configs:
+          - node_rank: 0
+            # Conventional SocketCAN names can be overridden without editing
+            # this file. All four resolved channel names must remain unique.
+            left_follower:
+              channel: ${oc.env:YAM_LEFT_FOLLOWER_CAN,can_left}
+              arm_type: yam
+              gripper_type: flexible_4310
+              # null preserves the mass in the pinned i2rt model. Replace with
+              # a measured per-device value only after calibration.
+              ee_mass: null
+              # Required measured motor-radian stops. No fallback is provided:
+              # an unset value must fail before any CAN device is opened.
+              gripper_limits:
+                - ${oc.env:YAM_LEFT_GRIPPER_CLOSED_RAD}
+                - ${oc.env:YAM_LEFT_GRIPPER_OPEN_RAD}
+              gravity_comp_factor: null
+              grav_comp_kd: null
+              coulomb_friction: null
+              use_coulomb_friction: false
+              bilateral_kp: 0.0
+              gripper_invert: false
+              enable_auto_recovery: false
+            right_follower:
+              channel: ${oc.env:YAM_RIGHT_FOLLOWER_CAN,can_right}
+              arm_type: yam
+              gripper_type: flexible_4310
+              ee_mass: null
+              gripper_limits:
+                - ${oc.env:YAM_RIGHT_GRIPPER_CLOSED_RAD}
+                - ${oc.env:YAM_RIGHT_GRIPPER_OPEN_RAD}
+              gravity_comp_factor: null
+              grav_comp_kd: null
+              coulomb_friction: null
+              use_coulomb_friction: false
+              bilateral_kp: 0.0
+              gripper_invert: false
+              enable_auto_recovery: false
+            left_leader:
+              channel: ${oc.env:YAM_LEFT_LEADER_CAN,can_lead_l}
+              arm_type: yam
+              gripper_type: yam_teaching_handle
+              # Set this to the measured teaching-handle mass when tuning
+              # gravity compensation; it is intentionally independent from
+              # the follower end-effector mass.
+              ee_mass: null
+              # Teaching handles do not use motorized gripper limits; the
+              # structural value is ignored by i2rt for this gripper type.
+              gripper_limits: [0.0, 1.0]
+              gravity_comp_factor: null
+              grav_comp_kd: null
+              coulomb_friction: null
+              use_coulomb_friction: false
+              bilateral_kp: 0.0
+              gripper_invert: false
+              enable_auto_recovery: false
+            right_leader:
+              channel: ${oc.env:YAM_RIGHT_LEADER_CAN,can_lead_r}
+              arm_type: yam
+              gripper_type: yam_teaching_handle
+              ee_mass: null
+              gripper_limits: [0.0, 1.0]
+              gravity_comp_factor: null
+              grav_comp_kd: null
+              coulomb_friction: null
+              use_coulomb_friction: false
+              bilateral_kp: 0.0
+              gripper_invert: false
+              enable_auto_recovery: false
+            cameras:
+              - name: top_rgb
+                serial: ${oc.env:YAM_TOP_CAMERA_SERIAL}
+                camera_type: realsense
+                resolution: [640, 480]
+                fps: 30
+                enable_depth: false
+              - name: left_rgb
+                serial: ${oc.env:YAM_LEFT_CAMERA_SERIAL}
+                camera_type: realsense
+                resolution: [640, 480]
+                fps: 30
+                enable_depth: false
+              - name: right_rgb
+                serial: ${oc.env:YAM_RIGHT_CAMERA_SERIAL}
+                camera_type: realsense
+                resolution: [640, 480]
+                fps: 30
+                enable_depth: false
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: null
+    project_name: rlinf
+    experiment_name: "dual-yam-collect-data"
+    logger_backends: ["tensorboard"]
+  num_data_episodes: 50
+  record_task_description: true
+
+seed: 1234
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    # The teaching-handle record button owns episode completion. Keeping this
+    # large finite value keeps trajectory metadata valid; manual control below
+    # prevents this value from ending an episode before the record button.
+    max_episode_steps: 10000
+    max_steps_per_rollout_epoch: 10000
+    auto_reset: false
+    ignore_terminations: false
+    override_cfg:
+      task_description: "pick_block"
+      manual_episode_control_only: true
+      leader_intervention:
+        enabled: true
+        wait_for_record_button: true
+        sync_on_reset: false
+        poll_frequency: 30.0
+        button_debounce_s: 0.2
+        # Outside synchronized teleoperation, command measured-pose hold rather
+        # than forwarding the collector's placeholder zero action.
+        unsynced_action_source: hold
+
+    data_collection:
+      enabled: true
+      save_dir: ${runner.logger.log_path}/collected_data
+      # Episodes are written directly as LeRobot data; there is no separate
+      # yam-repo conversion process.
+      export_format: "lerobot"
+      only_success: true
+      robot_type: "dual_yam"
+      fps: 30
+      # Keep all episodes in one shard and finalize metadata during clean
+      # shutdown. A positive value deliberately creates periodic id_N shards.
+      finalize_interval: 0
+      resume: false

@@ -30,6 +30,7 @@ RLinf is a flexible and scalable open-source RL infrastructure designed for Embo
 
 
 ## What's NEW!
+- [2026/08] 🔥 RLinf adds native dual-arm YAM teleoperation and direct LeRobot data collection without requiring a separate YAM application repository. Doc: [Dual-Arm YAM](docs/source-en/rst_source/examples/embodied/yam.rst).
 - [2026/08] 🔥 RLinf integrates Diffusion-NFT for SD3 and Wan2.2 video generation models. Doc: [RL for Video Generation Models](docs/source-en/rst_source/examples/video_models.rst).
 - [2026/08] 🔥 RLinf officially supports three more accelerators: Moore Threads (MUSA), Huawei Ascend (CANN), and AMD (ROCm). Docs: [Moore Threads MUSA](https://rlinf.readthedocs.io/en/latest/rst_source/guides/moore_threads_musa.html), [Ascend CANN](https://rlinf.readthedocs.io/en/latest/rst_source/guides/ascend_cann.html), [AMD ROCm](https://rlinf.readthedocs.io/en/latest/rst_source/guides/amd_rocm.html).
 - [2026/08] 🔥 RLinf supports GRPO training for Moonlight-16B-A3B (DeepSeek-V3 MLA + MoE). Doc: [Moonlight-16B GRPO](https://rlinf.readthedocs.io/en/latest/rst_source/examples/agentic/math_reasoning/moonlight.html).
@@ -257,6 +258,7 @@ RLinf supports SFT, simulation RL, and real-world RL for World Action Models (WA
           <li><a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/xsquare_turtle2.html">XSquare Turtle2</a> ✅</li>
           <li><a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/dosw1.html">DOS-W1</a> ✅</li>
           <li><a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/gim_arm.html">GimArm</a> ✅</li>
+          <li><a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/yam.html">Dual-Arm YAM data collection</a> ✅</li>
           <li>More...</li>
         </ul>
       </td>
@@ -276,7 +278,12 @@ RLinf supports SFT, simulation RL, and real-world RL for World Action Models (WA
             <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/franka_vr.html">
               PICO VR
             </a> ✅
-          </li>          
+          </li>
+          <li>
+            <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/yam.html">
+              YAM teaching handles
+            </a> ✅
+          </li>
         </ul>
       </td>
     </tr>

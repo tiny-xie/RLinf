@@ -15,6 +15,13 @@
 from .auto_config import RobotAutoConfig
 from .dosw1 import DOSW1HWConfig, DOSW1HWInfo
 from .dual_franka import DualFrankaConfig, DualFrankaHWInfo
+from .dual_yam import (
+    DualYamConfig,
+    DualYamHWInfo,
+    DualYamRobot,
+    YamCameraConfig,
+    YamDeviceConfig,
+)
 from .franka import FrankaConfig, FrankaHWInfo
 from .gim_arm import GimArmConfig, GimArmHWInfo
 from .xsquare import Turtle2Config, Turtle2HWInfo
@@ -25,10 +32,15 @@ __all__ = [
     "DOSW1HWInfo",
     "DualFrankaConfig",
     "DualFrankaHWInfo",
+    "DualYamConfig",
+    "DualYamHWInfo",
+    "DualYamRobot",
     "FrankaConfig",
     "FrankaHWInfo",
     "GimArmConfig",
     "GimArmHWInfo",
     "Turtle2Config",
     "Turtle2HWInfo",
+    "YamCameraConfig",
+    "YamDeviceConfig",
 ]
