@@ -73,6 +73,9 @@ from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import (
     LeRobotAlohaDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.x2robot_dataconfig import (
+    LeRobotX2robotDataConfig,
+)
 
 _CONFIGS = [
     TrainConfig(
@@ -525,6 +528,29 @@ _CONFIGS = [
             action_train_with_rotation_6d=False,  # User can add extra config in custom dataset
         ),
         pytorch_weight_path="checkpoints/torch/pi0_base",
+    ),
+    TrainConfig(
+        name="clean_table_sm2sm",
+        model=pi0_config.Pi0Config(action_horizon=20),
+        data=LeRobotX2robotDataConfig(
+            repo_id=(
+                "clean_table_ygg06170618_steam_sft,"
+                "clean_table_gqy062306250626_steam_rollout"
+            ),
+            mode="sm2sm",
+            state_history_size=3,
+            state_future_size=2,
+            action_dim=28,
+            random_drop_master=0.10,
+            random_drop_history=0.50,
+            random_drop_future=0.50,
+            random_pos_offset=0.020,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi0_base/params"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi0_base",
+        batch_size=128,
     ),
     TrainConfig(
         name="pi05_isaaclab_stack_cube",

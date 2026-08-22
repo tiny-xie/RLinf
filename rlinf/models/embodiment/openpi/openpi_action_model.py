@@ -615,6 +615,50 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
     def prepare_dagger_sft_batch(self, batch):
         """Prepare replay-buffer samples for DAgger SFT updates."""
         device = next(self.parameters()).device
+        x2robot_image_keys = {
+            camera: f"x2robot/image/{camera}"
+            for camera in ("face_view", "left_wrist_view", "right_wrist_view")
+        }
+        is_x2robot_batch = all(key in batch for key in x2robot_image_keys.values())
+        if is_x2robot_batch:
+            batch_size = batch["action"].shape[0]
+            obs_dict = {
+                "images": {
+                    camera: batch[key] for camera, key in x2robot_image_keys.items()
+                },
+                "state": batch["state"],
+                "prompt": ["empty"] * batch_size,
+            }
+            if "model_action" in batch:
+                actions = batch["model_action"].reshape(
+                    batch_size,
+                    self.config.action_horizon,
+                    self.config.action_dim,
+                )
+            else:
+                obs_dict["actions"] = batch["action"].reshape(
+                    batch_size, self.config.action_chunk, -1
+                )
+            processed_obs = self.input_transform(obs_dict, transpose=False)
+            for key in ("tokenized_prompt", "tokenized_prompt_mask"):
+                if key in batch:
+                    processed_obs[key] = batch[key]
+            if "model_action" not in batch:
+                actions = processed_obs.pop("actions")
+            processed_obs = self.precision_processor(processed_obs)
+            observation = _model.Observation.from_dict(processed_obs)
+            register_pytree_dataclasses(observation)
+            observation = tree_map(
+                lambda value: torch.as_tensor(value, device=device)
+                .contiguous()
+                .clone(),
+                observation,
+            )
+            return {
+                "observation": observation,
+                "actions": actions.to(device=device, dtype=torch.float32),
+            }
+
         obs_dict = {}
         obs_prefix_keys = [k for k in batch.keys() if k.startswith("observation/")]
         for key in obs_prefix_keys:
@@ -800,6 +844,21 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         return result
 
     def obs_processor(self, env_obs):
+        if any(
+            mode in self.config.config_name for mode in ("sm2sm", "sm2m", "s2m", "s2s")
+        ):
+            extra_views = env_obs["extra_view_images"]
+            states = self._select_configured_state(env_obs["states"])
+            return {
+                "images": {
+                    "face_view": env_obs["main_images"],
+                    "left_wrist_view": extra_views[:, 0],
+                    "right_wrist_view": extra_views[:, 1],
+                },
+                "state": states,
+                "prompt": env_obs["task_descriptions"],
+            }
+
         env_states = self._select_configured_state(env_obs["states"])
         processed_obs = {
             "observation/image": env_obs["main_images"],
@@ -933,6 +992,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         cloned_obs = copy_dict_tensor(
             {k: v for k, v in to_process_obs.items() if k != "prompt"}
         )
+        if "images" in cloned_obs:
+            images = cloned_obs.pop("images")
+            cloned_obs.update(
+                {f"x2robot/image/{camera}": image for camera, image in images.items()}
+            )
         forward_inputs.update(cloned_obs)
 
         result = {

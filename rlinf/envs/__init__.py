@@ -43,6 +43,7 @@ class SupportedEnvType(Enum):
     D4RL = "d4rl"
     DIFFUSION = "diffusion"
     POLARIS = "polaris"
+    X2ROBOT_TCP = "x2robot_tcp"
 
 
 def get_env_cls(env_type: str, env_cfg=None):
@@ -119,6 +120,10 @@ def get_env_cls(env_type: str, env_cfg=None):
         from rlinf.envs.realworld import RealWorldEnv
 
         return RealWorldEnv
+    elif env_type == SupportedEnvType.X2ROBOT_TCP:
+        from rlinf.envs.realworld.x2robot import X2RobotTCPRealWorldEnv
+
+        return X2RobotTCPRealWorldEnv
     elif env_type == SupportedEnvType.HABITAT:
         from rlinf.envs.habitat.habitat_env import HabitatEnv
 

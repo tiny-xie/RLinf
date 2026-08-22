@@ -29,7 +29,8 @@ from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
 from torch.utils._pytree import tree_map
 
-from rlinf.models.embodiment.base_policy import BasePolicy
+from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
+from rlinf.utils.pytree import register_pytree_dataclasses
 
 ArrayT = TypeVar("ArrayT", bound=torch.Tensor | np.ndarray)
 
@@ -454,7 +455,7 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
         self,
         data: dict[str, torch.Tensor],
         **kwargs,
-    ) -> tuple[torch.Tensor, dict[str, Any]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
         """CFGRL forward - unified for both SFT and CFGRL training.
 
         Supports two data formats:
@@ -485,7 +486,10 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
             state,
         ) = self._preprocess_observation(observation, train=True)
 
-        if "advantage" in data:
+        if is_sft_mode:
+            # Human corrections in DAgger are positive demonstrations.
+            advantage = torch.ones(actions.shape[0], dtype=torch.bool, device=device)
+        elif "advantage" in data:
             advantage = data["advantage"].to(device)
         elif "advantages" in data:
             advantage = data["advantages"].to(device)
@@ -598,9 +602,37 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
             ),
         }
 
+        if is_sft_mode and kwargs.get("forward_type") == ForwardType.SFT:
+            return flow_loss
         return flow_loss, metrics
 
     def obs_processor(self, env_obs):
+        if any(
+            mode in self.config.config_name for mode in ("sm2sm", "sm2m", "s2m", "s2s")
+        ):
+            descriptions = env_obs["task_descriptions"]
+            extra_views = env_obs["extra_view_images"]
+            states = env_obs["states"]
+            if torch.is_tensor(states):
+                states = states.to(dtype=torch.float32)
+            return {
+                "images": {
+                    "face_view": env_obs["main_images"],
+                    "left_wrist_view": extra_views[:, 0],
+                    "right_wrist_view": extra_views[:, 1],
+                },
+                "state": states,
+                "prompt": descriptions,
+                "positive_guidance_prompt": [
+                    f"{description}\nAdvantage: positive"
+                    for description in descriptions
+                ],
+                "negative_guidance_prompt": [
+                    f"{description}\nAdvantage: negative"
+                    for description in descriptions
+                ],
+            }
+
         processed_obs = {
             "observation/image": env_obs["main_images"],
             "prompt": env_obs["task_descriptions"],
@@ -665,6 +697,12 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
         )["actions"].numpy()
         forward_inputs = {
             "raw_actions": outputs["actions"],
+            "action": torch.from_numpy(actions)
+            .reshape(actions.shape[0], -1)
+            .contiguous(),
+            "model_action": outputs["actions"]
+            .reshape(outputs["actions"].shape[0], -1)
+            .contiguous(),
             "tokenized_prompt": processed_obs["tokenized_prompt"],
             "tokenized_prompt_mask": processed_obs["tokenized_prompt_mask"],
             "tokenized_positive_guidance_prompt": processed_obs[
@@ -680,7 +718,13 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
                 "tokenized_negative_guidance_prompt_mask"
             ],
         }
-        forward_inputs.update(to_process_obs)
+        replay_obs = dict(to_process_obs)
+        if "images" in replay_obs:
+            images = replay_obs.pop("images")
+            replay_obs.update(
+                {f"x2robot/image/{camera}": image for camera, image in images.items()}
+            )
+        forward_inputs.update(replay_obs)
         forward_inputs.pop("prompt", None)
         forward_inputs.pop("positive_guidance_prompt", None)
         forward_inputs.pop("negative_guidance_prompt", None)
@@ -688,6 +732,59 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
             "forward_inputs": forward_inputs,
         }
         return actions, result
+
+    def prepare_dagger_sft_batch(self, batch):
+        """Convert replay-buffer X2Robot corrections into CFG SFT inputs."""
+        device = next(self.parameters()).device
+        batch_size = batch["action"].shape[0]
+        empty_prompts = ["empty"] * batch_size
+        image_keys = {
+            camera: f"x2robot/image/{camera}"
+            for camera in ("face_view", "left_wrist_view", "right_wrist_view")
+        }
+        obs_dict = {
+            "images": {camera: batch[key] for camera, key in image_keys.items()},
+            "state": batch["state"],
+            "prompt": empty_prompts,
+            "positive_guidance_prompt": empty_prompts,
+            "negative_guidance_prompt": empty_prompts,
+        }
+
+        if "model_action" in batch:
+            actions = batch["model_action"].reshape(
+                batch_size, self.config.action_horizon, self.config.action_dim
+            )
+        else:
+            obs_dict["actions"] = batch["action"].reshape(
+                batch_size, self.config.action_chunk, -1
+            )
+
+        processed_obs = self.input_transform(obs_dict, transpose=False)
+        token_keys = (
+            "tokenized_prompt",
+            "tokenized_prompt_mask",
+            "tokenized_positive_guidance_prompt",
+            "tokenized_positive_guidance_prompt_mask",
+            "tokenized_negative_guidance_prompt",
+            "tokenized_negative_guidance_prompt_mask",
+        )
+        for key in token_keys:
+            if key in batch:
+                processed_obs[key] = batch[key]
+
+        if "model_action" not in batch:
+            actions = processed_obs.pop("actions")
+        processed_obs = self.precision_processor(processed_obs)
+        observation = Observation.from_dict(processed_obs)
+        register_pytree_dataclasses(observation)
+        observation = tree_map(
+            lambda value: torch.as_tensor(value, device=device).contiguous().clone(),
+            observation,
+        )
+        return {
+            "observation": observation,
+            "actions": actions.to(device=device, dtype=torch.float32),
+        }
 
     @torch.no_grad()
     def sample_actions(

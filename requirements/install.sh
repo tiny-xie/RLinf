@@ -98,7 +98,7 @@ NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_ENGINES=("sglang" "vllm")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0" "molmoact2" "evo1" "diffusion")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "robocasa365" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "robocasa365" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "x2robot" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
 
 #=======================Utility Functions=======================
 
@@ -1880,6 +1880,12 @@ install_openpi_model() {
             install_polaris_env
             uv pip install "rlinf-openpi==0.1.1"
             ;;
+        x2robot)
+            create_and_sync_venv
+            install_common_embodied_deps
+            uv pip install "rlinf-openpi==0.1.1"
+            install_flash_attn
+            ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
             exit 1
@@ -1907,6 +1913,9 @@ EOF
     # runtime, so re-assert its bound; otherwise a later resolve drifts tokenizers
     # past 0.22 and transformers refuses to import.
     uv pip install "tokenizers>=0.21,<0.22"
+    if [ "$ENV_NAME" = "x2robot" ]; then
+        bash "$SCRIPT_DIR/embodied/patch_openpi_state_sequence.sh"
+    fi
     uv pip uninstall pynvml || true
 }
 
@@ -2310,6 +2319,9 @@ install_env_only() {
             ;;
         polaris)
             install_polaris_env
+            ;;
+        x2robot)
+            install_common_embodied_deps
             ;;
         libero|maniskill_libero)
             install_common_embodied_deps
