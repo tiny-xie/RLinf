@@ -60,6 +60,7 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         action_chunk: int | None = None,
         config_name: str = "",
         state_indices: Sequence[int] | None = None,
+        state_sequence_index: int | None = None,
         rlt_cfg: OpenPiPytorchRLTConfig | None = None,
     ):
         super().__init__(
@@ -78,6 +79,12 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         # Optional subset of the raw env state dim (openpi ``state_indices``).
         # ``None`` (the BEHAVIOR default) is an identity passthrough.
         self.state_indices = list(state_indices) if state_indices else None
+        # X2Robot observations carry [history, current, future, state_dim].
+        # Stage2 consumes one current proprio vector while the frozen PI0.5
+        # feature model still receives the complete state sequence.
+        self.state_sequence_index = (
+            int(state_sequence_index) if state_sequence_index is not None else None
+        )
 
         # openpi.transforms pipeline state (installed by :meth:`setup_wrappers`).
         self._input_transform_fn = None
@@ -139,6 +146,24 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
             return states.index_select(-1, index_tensor)
         return np.asarray(states)[..., indices]
 
+    def _select_proprio_state(self, states):
+        raw_proprio = self._select_configured_state(states)
+        if self.state_sequence_index is None:
+            return raw_proprio
+        if raw_proprio.ndim < 3:
+            raise ValueError(
+                "state_sequence_index requires batched sequence states with "
+                f"shape [B, T, D], got {tuple(raw_proprio.shape)}."
+            )
+        sequence_len = raw_proprio.shape[-2]
+        index = self.state_sequence_index
+        if not -sequence_len <= index < sequence_len:
+            raise IndexError(
+                f"state_sequence_index={index} is out of range for "
+                f"sequence length {sequence_len}."
+            )
+        return raw_proprio[..., index, :]
+
     def _repack_env_obs(self, env_obs: dict) -> dict:
         """Map the env's observation dict to the ``observation/*`` keys the
         openpi pipeline expects.
@@ -155,6 +180,25 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         (BEHAVIOR, for instance, emits no ``extra_view_images`` key).
         """
         env_states = self._select_configured_state(env_obs["states"])
+        if any(
+            mode in self.config_name for mode in ("sm2sm", "sm2m", "s2m", "s2s")
+        ):
+            extra_views = env_obs.get("extra_view_images")
+            if extra_views is None or extra_views.shape[1] < 2:
+                raise ValueError(
+                    "X2Robot RLT inference requires two wrist views in "
+                    "env_obs['extra_view_images'] with order [left, right]."
+                )
+            return {
+                "images": {
+                    "face_view": env_obs["main_images"],
+                    "left_wrist_view": extra_views[:, 0],
+                    "right_wrist_view": extra_views[:, 1],
+                },
+                "state": env_states,
+                "prompt": env_obs["task_descriptions"],
+            }
+
         processed_obs = {
             "observation/image": env_obs["main_images"],
             "prompt": env_obs["task_descriptions"],
@@ -384,7 +428,7 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
             {"actions": model_actions, "state": observation.state}
         )["actions"]
 
-        raw_proprio = self._select_configured_state(env_obs["states"])
+        raw_proprio = self._select_proprio_state(env_obs["states"])
         if "maniskill" in self.config_name.lower():
             state_dim = (
                 raw_proprio.shape[-1]

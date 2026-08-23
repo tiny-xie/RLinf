@@ -62,6 +62,7 @@ class LeRobotX2robotDataConfig(DataConfigFactory):
     random_drop_history: float = 0.0
     random_drop_future: float = 0.0
     random_pos_offset: float = 0.0
+    random_image_aug: float = 0.0
     only_right_obs: bool = False
     unified_input: bool = False
     individual_keys: bool = False
@@ -110,6 +111,7 @@ class LeRobotX2robotDataConfig(DataConfigFactory):
                     random_drop_history=self.random_drop_history,
                     random_drop_future=self.random_drop_future,
                     random_pos_offset=self.random_pos_offset,
+                    random_image_aug=self.random_image_aug,
                     only_right_obs=self.only_right_obs,
                     unified_input=self.unified_input,
                     individual_keys=self.individual_keys,
@@ -118,10 +120,24 @@ class LeRobotX2robotDataConfig(DataConfigFactory):
             outputs=[arx_policy.ArxOutputs(action_dim=self.action_dim)],
         )
         if self.use_delta_actions:
-            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            delta_action_mask = (
+                _transforms.make_bool_mask(6, -1, 6, -1, 6, -1, 6, -1)
+                if self.mode == "sm2sm"
+                else _transforms.make_bool_mask(6, -1, 6, -1)
+            )
             data_transforms = data_transforms.push(
-                inputs=[_transforms.DeltaActions(delta_action_mask)],
-                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+                inputs=[
+                    arx_policy.ArxDeltaActions(
+                        mask=delta_action_mask,
+                        current_idx=self.state_history_size,
+                    )
+                ],
+                outputs=[
+                    arx_policy.ArxAbsoluteActions(
+                        mask=delta_action_mask,
+                        current_idx=self.state_history_size,
+                    )
+                ],
             )
 
         model_transforms = ModelTransformFactory()(model_config)
@@ -159,5 +175,7 @@ class LeRobotX2robotDataConfig(DataConfigFactory):
             replace_kwargs["state_history_size"] = self.state_history_size
         if "state_future_size" in data_config_fields:
             replace_kwargs["state_future_size"] = self.state_future_size
+        if "state_step" in data_config_fields:
+            replace_kwargs["state_step"] = self.state_step
 
         return dataclasses.replace(base_config, **replace_kwargs)

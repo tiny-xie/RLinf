@@ -18,7 +18,11 @@ import pytest
 pytest.importorskip("einops")
 pytest.importorskip("openpi")
 
-from rlinf.models.embodiment.openpi.policies.arx_policy import ArxInputs  # noqa: E402
+from rlinf.models.embodiment.openpi.policies.arx_policy import (  # noqa: E402
+    ArxAbsoluteActions,
+    ArxDeltaActions,
+    ArxInputs,
+)
 
 
 def _images():
@@ -67,3 +71,19 @@ def test_arx_sft_augmentation_supports_32d_sequence_state():
     assert result["actions"].shape == (20, 32)
     expected_master = np.repeat(result["state"][3:4, :14], 6, axis=0)
     np.testing.assert_array_equal(result["state"][:, 14:28], expected_master)
+
+
+def test_sm2sm_delta_actions_cover_all_28_dims_and_round_trip():
+    state = np.arange(4 * 32, dtype=np.float32).reshape(4, 32)
+    actions = np.full((20, 28), 200.0, dtype=np.float32)
+    mask = tuple([True] * 6 + [False]) * 4
+
+    delta = ArxDeltaActions(mask=mask, current_idx=3)
+    absolute = ArxAbsoluteActions(mask=mask, current_idx=3)
+    encoded = delta({"state": state, "actions": actions.copy()})
+
+    # The master half (14:28) must be converted too; the old 14D mask left it
+    # absolute even though the config advertised sm2sm delta actions.
+    assert np.any(encoded["actions"][:, 14:20] != actions[:, 14:20])
+    decoded = absolute({"state": state, "actions": encoded["actions"]})
+    np.testing.assert_allclose(decoded["actions"], actions)

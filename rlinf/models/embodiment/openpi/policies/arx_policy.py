@@ -19,6 +19,7 @@ import einops
 import numpy as np
 from openpi import transforms
 from openpi.models import model as _model
+from PIL import Image, ImageEnhance
 
 
 def make_arx_example() -> dict:
@@ -39,6 +40,86 @@ def make_arx_example() -> dict:
 
 
 @dataclasses.dataclass(frozen=True)
+class ArxDeltaActions(transforms.DataTransformFn):
+    """Convert absolute ARX actions to deltas from the current state frame."""
+
+    mask: tuple[bool, ...]
+    current_idx: int = 0
+
+    def __call__(self, data: dict) -> dict:
+        if "actions" not in data:
+            return data
+
+        state = np.asarray(data["state"])
+        actions = np.asarray(data["actions"]).copy()
+        if state.ndim == 1:
+            current_state = state
+        elif state.ndim == 2:
+            if not 0 <= self.current_idx < state.shape[0]:
+                raise IndexError(
+                    f"current_idx={self.current_idx} is out of range for "
+                    f"state shape {state.shape}."
+                )
+            current_state = state[self.current_idx]
+        else:
+            raise ValueError(
+                f"Expected state shape (D,) or (T, D), got {state.shape}."
+            )
+
+        mask = np.asarray(self.mask, dtype=bool)
+        dims = len(mask)
+        if actions.shape[-1] < dims or current_state.shape[-1] < dims:
+            raise ValueError(
+                "ARX delta mask exceeds state/action dimensions: "
+                f"mask={dims}, state={current_state.shape[-1]}, "
+                f"action={actions.shape[-1]}."
+            )
+        actions[..., :dims] -= np.where(mask, current_state[:dims], 0.0)
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class ArxAbsoluteActions(transforms.DataTransformFn):
+    """Convert predicted ARX deltas back to absolute actions."""
+
+    mask: tuple[bool, ...]
+    current_idx: int = 0
+
+    def __call__(self, data: dict) -> dict:
+        if "actions" not in data:
+            return data
+
+        state = np.asarray(data["state"])
+        actions = np.asarray(data["actions"]).copy()
+        if state.ndim == 1:
+            current_state = state
+        elif state.ndim == 2:
+            if not 0 <= self.current_idx < state.shape[0]:
+                raise IndexError(
+                    f"current_idx={self.current_idx} is out of range for "
+                    f"state shape {state.shape}."
+                )
+            current_state = state[self.current_idx]
+        else:
+            raise ValueError(
+                f"Expected state shape (D,) or (T, D), got {state.shape}."
+            )
+
+        mask = np.asarray(self.mask, dtype=bool)
+        dims = len(mask)
+        if actions.shape[-1] < dims or current_state.shape[-1] < dims:
+            raise ValueError(
+                "ARX delta mask exceeds state/action dimensions: "
+                f"mask={dims}, state={current_state.shape[-1]}, "
+                f"action={actions.shape[-1]}."
+            )
+        actions[..., :dims] += np.where(mask, current_state[:dims], 0.0)
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class ArxInputs(transforms.DataTransformFn):
     """Transform inputs for the ARX/X2Robot policy."""
 
@@ -53,6 +134,7 @@ class ArxInputs(transforms.DataTransformFn):
     random_drop_history: float = 0.0
     random_drop_future: float = 0.0
     random_pos_offset: float = 0.0
+    random_image_aug: float = 0.0
     only_right_obs: bool = False
     unified_input: bool = False
     individual_keys: bool = False
@@ -62,6 +144,22 @@ class ArxInputs(transforms.DataTransformFn):
         "face_view",
         "right_wrist_view",
     )
+
+    @staticmethod
+    def _augment_image(
+        image: np.ndarray,
+        *,
+        brightness: float,
+        contrast: float,
+        saturation: float,
+        sharpness: float,
+    ) -> np.ndarray:
+        pil_image = Image.fromarray(image)
+        pil_image = ImageEnhance.Brightness(pil_image).enhance(brightness)
+        pil_image = ImageEnhance.Contrast(pil_image).enhance(contrast)
+        pil_image = ImageEnhance.Color(pil_image).enhance(saturation)
+        pil_image = ImageEnhance.Sharpness(pil_image).enhance(sharpness)
+        return np.asarray(pil_image, dtype=np.uint8)
 
     def __call__(self, data: dict) -> dict:
         state = data["state"]
@@ -103,6 +201,18 @@ class ArxInputs(transforms.DataTransformFn):
         for key in self.EXPECTED_CAMERAS:
             assert key in data["images"], f"Images must contain {key}."
             data["images"][key] = convert_image(data["images"][key])
+
+        if training_sample and random.random() < self.random_image_aug:
+            augmentation = {
+                "brightness": random.uniform(0.8, 1.2),
+                "contrast": random.uniform(0.85, 1.15),
+                "saturation": random.uniform(0.8, 1.2),
+                "sharpness": random.uniform(0.8, 1.25),
+            }
+            for key in self.EXPECTED_CAMERAS:
+                data["images"][key] = self._augment_image(
+                    data["images"][key], **augmentation
+                )
 
         inputs = {
             "image": {

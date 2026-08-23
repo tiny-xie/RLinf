@@ -19,6 +19,7 @@ import pathlib
 from typing import Optional
 
 import openpi.models.pi0_config as pi0_config
+import openpi.transforms as _transforms
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 from omegaconf import DictConfig, OmegaConf
@@ -551,6 +552,55 @@ _CONFIGS = [
         ),
         pytorch_weight_path="checkpoints/torch/pi0_base",
         batch_size=128,
+    ),
+    TrainConfig(
+        name="pi05_x2robot_sm2sm_rlt",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=20,
+            max_token_len=640,
+            discrete_state_input=True,
+        ),
+        data=LeRobotX2robotDataConfig(
+            repo_id="bagging_490",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(asset_id="bagging_490_state4"),
+            mode="sm2sm",
+            state_history_size=3,
+            state_future_size=0,
+            state_step=1,
+            action_dim=28,
+            use_delta_actions=True,
+            random_drop_history=0.50,
+            random_image_aug=0.60,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "left_wrist_view": "left_wrist_view",
+                                "face_view": "face_view",
+                                "right_wrist_view": "right_wrist_view",
+                            },
+                            "state": "state",
+                            "actions": "actions",
+                            "actions_is_pad": "actions_is_pad",
+                            "prompt": "prompt",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base/params"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        batch_size=128,
+        num_workers=8,
+        num_train_steps=50_000,
+        save_interval=2_000,
+        keep_period=2_000,
     ),
     TrainConfig(
         name="pi05_isaaclab_stack_cube",
