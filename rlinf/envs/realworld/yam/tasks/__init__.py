@@ -54,14 +54,12 @@ def create_dual_yam_joint_env(
 
     if env_cfg is not None:
         main_image_key = env_cfg.get("main_image_key")
-        if (
-            main_image_key is not None
-            and main_image_key not in env.observation_space["frames"]
-        ):
+        frame_spaces = env.observation_space["frames"].spaces
+        if main_image_key is not None and main_image_key not in frame_spaces:
             env.close()
             raise ValueError(
                 f"YAM main_image_key {main_image_key!r} is not configured; "
-                f"available cameras: {list(env.observation_space['frames'])}"
+                f"available cameras: {list(frame_spaces)}"
             )
     if use_leaders:
         return DualYamLeaderIntervention(env, leader_config)

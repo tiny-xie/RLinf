@@ -100,11 +100,14 @@ class DataCollector(Worker):
         for key, val in obs.items():
             if isinstance(val, np.ndarray):
                 val = torch.from_numpy(val)
-            val = val.cpu()
-            if key == "images":
-                ret_obs["main_images"] = val.clone()
+            if isinstance(val, torch.Tensor):
+                processed = val.detach().cpu().clone()
             else:
-                ret_obs[key] = val.clone()
+                processed = val
+            if key == "images":
+                ret_obs["main_images"] = processed
+            else:
+                ret_obs[key] = processed
         return ret_obs
 
     def run(self):
