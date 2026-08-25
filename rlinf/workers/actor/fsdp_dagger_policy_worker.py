@@ -454,11 +454,16 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
         use_action_chunk_loss = (
             SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.OPENPI
         )
-        return self.model(
+        output = self.model(
             forward_type=ForwardType.SFT,
             data=data,
             use_action_chunk_loss=use_action_chunk_loss,
         )
+        # RLT-enabled OpenPI returns the joint loss plus its VLA/RLT components;
+        # plain OpenPI and CFG models return the scalar loss directly.
+        if isinstance(output, dict):
+            return output["loss"]
+        return output
 
     @Worker.timer("update_one_epoch")
     def update_one_epoch(self):

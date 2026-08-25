@@ -24,12 +24,18 @@ client changing a single byte.
 Wire protocol (unchanged, every frame is ``4-byte little-endian length +
 payload``)::
 
-    slave -> bridge :  JSON  {"follow1_pos": (h+1,7), "follow2_pos": (h+1,7)}
+    slave -> bridge :  JSON  {"follow1_pos": (h+1,7), "follow2_pos": (h+1,7),
+                              "running_mode": 1|3,
+                              "inference_session_id": int}
                        JPEG  left wrist
                        JPEG  face / front
                        JPEG  right wrist
     bridge -> slave :  JSON  {"follow1_pos": (move_steps+1,7),
                               "follow2_pos": (move_steps+1,7)}
+
+The bridge also accepts robo-avatar's compatible variant, where the three JPEG
+frames are base64 encoded under ``JSON["images"]`` instead of following as
+separate frames.
 
 Granularity note
 ----------------
@@ -51,6 +57,8 @@ the caller blocks on the robot rather than spinning.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import dataclasses
 import json
@@ -60,6 +68,7 @@ import socket
 import struct
 import threading
 from collections import deque
+from pathlib import Path
 from typing import Any, Mapping
 
 import cv2
@@ -72,6 +81,69 @@ logger = logging.getLogger(__name__)
 
 # Sentinel pushed onto the observation queue when the slave disconnects.
 _DISCONNECTED = object()
+
+RUNNING_MODE_VLA = 1
+RUNNING_MODE_TAKEOVER = 2
+RUNNING_MODE_RLT = 3
+POLICY_RUNNING_MODES = frozenset((RUNNING_MODE_VLA, RUNNING_MODE_RLT))
+
+
+def _parse_running_mode(data: Mapping[str, Any]) -> int:
+    """Read the policy-control mode, defaulting old clients to VLA."""
+
+    raw_mode = data.get("running_mode", data.get("mode", RUNNING_MODE_VLA))
+    try:
+        running_mode = int(raw_mode)
+    except (TypeError, ValueError) as exc:
+        raise ConnectionError(f"invalid x2robot running_mode: {raw_mode!r}") from exc
+    if running_mode not in POLICY_RUNNING_MODES:
+        raise ConnectionError(
+            "x2robot inference connection only accepts policy modes "
+            f"{sorted(POLICY_RUNNING_MODES)}, got {running_mode}"
+        )
+    return running_mode
+
+
+def _running_mode_info(running_mode: int) -> dict[str, Any]:
+    """Build env info used by the real-world RLT route."""
+
+    return {
+        "running_mode": int(running_mode),
+        "rlt_switch_flags": bool(running_mode == RUNNING_MODE_RLT),
+    }
+
+
+def _decode_embedded_frames(data: Mapping[str, Any]) -> dict[str, np.ndarray] | None:
+    """Decode robo-avatar's base64-in-JSON camera payload when present."""
+
+    images = data.get("images")
+    if not isinstance(images, Mapping):
+        return None
+    aliases = {
+        "left_wrist_view": "left",
+        "face_view": "front",
+        "right_wrist_view": "right",
+    }
+    frames = {}
+    for output_name, input_name in aliases.items():
+        encoded = images.get(input_name)
+        if not isinstance(encoded, str):
+            raise ConnectionError(
+                f"x2robot embedded images missing {input_name!r} camera"
+            )
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError, TypeError) as exc:
+            raise ConnectionError(
+                f"invalid base64 payload for x2robot camera {input_name!r}"
+            ) from exc
+        image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ConnectionError(
+                f"failed to decode embedded x2robot camera {input_name!r}"
+            )
+        frames[output_name] = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return frames
 
 
 @dataclasses.dataclass
@@ -118,6 +190,13 @@ class X2RobotTCPConfig:
     upload_port: int = 57772
     upload_maxlen: int = 4000
 
+    # Lossless 20 Hz observation recording from the always-on upload channel.
+    # This is independent of the chunk-granular RLT replay buffer.
+    lerobot_record_enabled: bool = False
+    lerobot_data_path: str | None = None
+    lerobot_fps: int = 20
+    lerobot_queue_size: int = 4000
+
     # Seconds to wait for the slave before reset()/round-trip gives up.
     # ``None`` waits forever (the usual choice on a real robot).
     connect_timeout: float | None = None
@@ -127,6 +206,10 @@ class X2RobotTCPConfig:
             self.latency_step = self.state_future_size
         if self.policy_mode not in ("s2s", "s2m", "sm2m", "sm2sm"):
             raise ValueError(f"unsupported policy_mode {self.policy_mode!r}")
+        if self.lerobot_record_enabled and not self.lerobot_data_path:
+            raise ValueError(
+                "lerobot_data_path is required when lerobot_record_enabled=True"
+            )
         self.blend_skip_dims = tuple(self.blend_skip_dims)
 
     @property
@@ -235,6 +318,11 @@ class X2RobotTCPEnv(gym.Env):
 
         self.upload: UploadServer | None = None
         if self.config.upload_enabled:
+            lerobot_data_path = None
+            if self.config.lerobot_record_enabled:
+                lerobot_data_path = str(
+                    Path(self.config.lerobot_data_path) / f"env_{self.env_idx}"
+                )
             self.upload = UploadServer(
                 host=self.config.host,
                 port=self.config.upload_port,
@@ -242,6 +330,10 @@ class X2RobotTCPEnv(gym.Env):
                 image_width=self.config.image_width,
                 maxlen=self.config.upload_maxlen,
                 decode_images=False,
+                lerobot_data_path=lerobot_data_path,
+                task_description=self.config.task_description,
+                lerobot_fps=self.config.lerobot_fps,
+                lerobot_queue_size=self.config.lerobot_queue_size,
             )
             self.upload.start()
 
@@ -323,13 +415,48 @@ class X2RobotTCPEnv(gym.Env):
             # action queue on reconnect, so carrying master history across
             # would condition the policy on actions that were never executed.
             master_queue: deque = deque(maxlen=100)
+            last_running_mode: int | None = None
+            last_session_id: int | None = None
             self._connected.set()
 
             try:
                 while not self._stop.is_set():
-                    slave_state_raw, frames = self._read_frame(conn)
+                    slave_state_raw, frames, running_mode, session_id = (
+                        self._read_frame(conn)
+                    )
+                    mode_changed = (
+                        last_running_mode is not None
+                        and running_mode != last_running_mode
+                    )
+                    session_changed = (
+                        last_session_id is not None
+                        and session_id is not None
+                        and session_id != last_session_id
+                    )
+                    if mode_changed or session_changed:
+                        # The slave discards the unexecuted portion of its old
+                        # policy chunk when its mode/session changes. Drop the
+                        # matching predicted history here and seed it again
+                        # from the current pose.
+                        master_queue.clear()
+                        logger.info(
+                            "x2robot policy request changed mode %s -> %s, "
+                            "session %s -> %s; reset action history",
+                            last_running_mode,
+                            running_mode,
+                            last_session_id,
+                            session_id,
+                        )
+                    last_running_mode = running_mode
+                    last_session_id = session_id
                     state = self._assemble_state(slave_state_raw, master_queue)
-                    self._obs_q.put({"state_seq": state, "frames": frames})
+                    self._obs_q.put(
+                        {
+                            "state_seq": state,
+                            "frames": frames,
+                            "running_mode": running_mode,
+                        }
+                    )
 
                     chunk = self._chunk_q.get()  # (action_horizon, 28)
                     if chunk is None:  # shutting down
@@ -360,19 +487,27 @@ class X2RobotTCPEnv(gym.Env):
         if payload is None:
             raise ConnectionError("client disconnected during JSON payload")
         data = json.loads(payload.decode("utf8"))
+        running_mode = _parse_running_mode(data)
+        raw_session_id = data.get("inference_session_id")
+        try:
+            session_id = None if raw_session_id is None else int(raw_session_id)
+        except (TypeError, ValueError) as exc:
+            raise ConnectionError(
+                f"invalid x2robot inference_session_id: {raw_session_id!r}"
+            ) from exc
         left = np.asarray(data["follow1_pos"], dtype=np.float32)  # (h+1, 7)
         right = np.asarray(data["follow2_pos"], dtype=np.float32)  # (h+1, 7)
 
-        # Fixed upload order: left wrist, face, right wrist.
-        img_left = self._fit(_read_img(conn))
-        img_face = self._fit(_read_img(conn))
-        img_right = self._fit(_read_img(conn))
-        frames = {
-            "face_view": img_face,
-            "left_wrist_view": img_left,
-            "right_wrist_view": img_right,
-        }
-        return (left, right), frames
+        frames = _decode_embedded_frames(data)
+        if frames is None:
+            # Legacy raw-frame protocol: left wrist, face, right wrist.
+            frames = {
+                "left_wrist_view": _read_img(conn),
+                "face_view": _read_img(conn),
+                "right_wrist_view": _read_img(conn),
+            }
+        frames = {name: self._fit(image) for name, image in frames.items()}
+        return (left, right), frames, running_mode, session_id
 
     def _fit(self, image: np.ndarray) -> np.ndarray:
         c = self.config
@@ -477,7 +612,7 @@ class X2RobotTCPEnv(gym.Env):
         item = self._next_obs(self.config.connect_timeout)
         while item is None:
             item = self._next_obs(self.config.connect_timeout)
-        return self._to_raw_obs(item), {}
+        return self._to_raw_obs(item), _running_mode_info(item["running_mode"])
 
     def chunk_round_trip(self, chunk: np.ndarray):
         """Send one action chunk, then block for the next uploaded observation.
@@ -489,10 +624,16 @@ class X2RobotTCPEnv(gym.Env):
         self._chunk_q.put(np.asarray(chunk))
         item = self._next_obs(self.config.connect_timeout)
         if item is None:
-            # Disconnect: the slave either took over (mode != 1) or the
+            # Disconnect: the slave either took over (mode 2) or the
             # recording ended.  Episode boundary; observation is unavailable.
             return None, 0.0, False, True, {"disconnected": True}
-        return self._to_raw_obs(item), 0.0, False, False, {}
+        return (
+            self._to_raw_obs(item),
+            0.0,
+            False,
+            False,
+            _running_mode_info(item["running_mode"]),
+        )
 
     def step(self, action):
         raise NotImplementedError(

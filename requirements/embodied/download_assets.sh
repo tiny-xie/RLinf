@@ -5,12 +5,11 @@ set -euo pipefail
 DOWNLOAD_DIR=${DOWNLOAD_DIR:-$HOME}
 SUPPORT_LIST=("maniskill" "openpi")
 GITHUB_PREFIX=${GITHUB_PREFIX:-""}
-USE_MIRRORS=${USE_MIRRORS:-0}
 ASSETS=()
 
 print_help() {
 	cat <<EOF
-Usage: bash download_assets.sh [--dir DIR] [--assets NAMES] [--use-mirror]
+Usage: bash download_assets.sh [--dir DIR] [--assets NAMES]
 
 Options:
   --dir DIR         Root directory to store all downloaded assets.
@@ -18,90 +17,28 @@ Options:
 
   --assets NAMES    Comma-separated list of assets to download.
 
-  --use-mirror      Use mirrors (HuggingFace / GitHub) for faster downloads.
-					Mirrors are also picked up automatically when HF_ENDPOINT /
-					GITHUB_PREFIX are already exported (e.g. by install.sh).
-
 Examples:
   bash requirements/embodied/download_assets.sh --assets maniskill
   bash requirements/embodied/download_assets.sh --dir /opt/.assets --assets maniskill,openpi
-  bash requirements/embodied/download_assets.sh --use-mirror --assets maniskill,openpi
 EOF
-}
-
-# Configure HuggingFace / GitHub mirrors when requested. This is needed when the
-# script is run on its own (e.g. a standalone Docker RUN) and does not inherit the
-# mirror env vars that install.sh's setup_mirror exports. Values mirror install.sh.
-setup_mirror() {
-	if [ "$USE_MIRRORS" -eq 1 ]; then
-		export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
-		export GITHUB_PREFIX=${GITHUB_PREFIX:-https://gh-proxy.com/}
-	fi
-}
-
-# Ride out transient network / HF Hub errors (e.g. HTTP 429 rate limits during
-# parallel Docker builds) with exponential backoff.
-retry_cmd() {
-	local max=5 delay=15 attempt=1
-	until "$@"; do
-		if [ "$attempt" -ge "$max" ]; then
-			echo "[download_assets] '$*' failed after ${max} attempts" >&2
-			return 1
-		fi
-		local wait=$((delay + RANDOM % 10))
-		echo "[download_assets] '$*' failed (attempt ${attempt}/${max}); retrying in ${wait}s" >&2
-		sleep "$wait"
-		attempt=$((attempt + 1))
-		delay=$((delay * 2))
-	done
 }
 
 download_maniskill_assets() {
 	local root_dir=$1
-	local ms_import_err
 
 	# ManiSkill assets
 	export MS_ASSET_DIR="${root_dir}/.maniskill"
 	if [ -d "$MS_ASSET_DIR" ]; then
 		echo "[download_assets] ManiSkill assets already exist at $MS_ASSET_DIR, skipping download."
-	elif ! ms_import_err=$(python -c "import mani_skill" 2>&1); then
-		# The download goes through mani_skill, and so through torch, which needs
-		# driver libraries the container runtime only injects at run time. Skip
-		# rather than fail so image builds still succeed. MS_ASSET_DIR is left
-		# uncreated so a later run does not mistake it for a finished download.
-		echo "[download_assets] mani_skill is not importable; skipping the ManiSkill assets." >&2
-		echo "[download_assets] Re-run 'download_assets --assets maniskill' once it is." >&2
-		echo "$ms_import_err" >&2
 	else
 		mkdir -p "$MS_ASSET_DIR"
-		if [ "$USE_MIRRORS" -eq 1 ]; then
-			# mani_skill.utils.download_asset hardcodes huggingface.co / github.com
-			# URLs in DATA_SOURCES and fetches them with urllib, which ignores
-			# HF_ENDPOINT and git's insteadOf. Rewrite the in-memory URLs to the
-			# mirrors before downloading instead of calling the module directly.
-			for uid in bridge_v2_real2sim widowx250s; do
-				python - "$uid" <<'PYEOF'
-import os, sys
-from mani_skill.utils.download_asset import main, parse_args
-from mani_skill.utils.assets import data as ds
-
-hf = os.environ.get("HF_ENDPOINT", "").rstrip("/")
-gh = os.environ.get("GITHUB_PREFIX", "")
-for src in ds.DATA_SOURCES.values():
-    url = getattr(src, "url", None)
-    if not url:
-        continue
-    if hf and url.startswith("https://huggingface.co"):
-        src.url = hf + url[len("https://huggingface.co"):]
-    elif gh and url.startswith("https://github.com"):
-        src.url = gh + url
-main(parse_args([sys.argv[1], "-y"]))
-PYEOF
-			done
-		else
-			retry_cmd python -m mani_skill.utils.download_asset bridge_v2_real2sim -y
-			retry_cmd python -m mani_skill.utils.download_asset widowx250s -y
-		fi
+        # Ensure mani_skill is installed
+        if ! python -c "import mani_skill" &> /dev/null; then
+            echo "mani_skill is not installed. Please install it first." >&2
+            exit 1
+        fi
+		python -m mani_skill.utils.download_asset bridge_v2_real2sim -y
+		python -m mani_skill.utils.download_asset widowx250s -y
 	fi
 
 	# SAPIEN assets (PhysX)
@@ -111,7 +48,7 @@ PYEOF
 		echo "[download_assets] SAPIEN PhysX assets already exist at $PHYSX_DIR, skipping download."
 	else
 		mkdir -p "$PHYSX_DIR"
-		retry_cmd wget -O "$PHYSX_DIR/linux-so.zip" "${GITHUB_PREFIX}https://github.com/sapien-sim/physx-precompiled/releases/download/${PHYSX_VERSION}/linux-so.zip"
+		wget -O "$PHYSX_DIR/linux-so.zip" "${GITHUB_PREFIX}https://github.com/sapien-sim/physx-precompiled/releases/download/${PHYSX_VERSION}/linux-so.zip"
 		unzip "$PHYSX_DIR/linux-so.zip" -d "$PHYSX_DIR" && rm "$PHYSX_DIR/linux-so.zip"
 	fi
 }
@@ -120,12 +57,25 @@ download_openpi_assets() {
 	local root_dir=$1
 
 	export TOKENIZER_DIR="${root_dir}/.cache/openpi/"
+	local tokenizer_file="${TOKENIZER_DIR}/big_vision/paligemma_tokenizer.model"
 
-	if [ -f "$TOKENIZER_DIR/paligemma_tokenizer.model" ]; then
+	if [ -f "$tokenizer_file" ]; then
 		echo "[download_assets] OpenPI tokenizer already exists at $TOKENIZER_DIR, skipping download."
 	else
 		mkdir -p "$TOKENIZER_DIR"
-		retry_cmd hf download RLinf/openpi_tokenizer --local-dir "$TOKENIZER_DIR"
+		if ! hf download RLinf/openpi_tokenizer --local-dir "$TOKENIZER_DIR"; then
+			echo "[download_assets] hf download failed, retrying OpenPI tokenizer with direct URL..." >&2
+			mkdir -p "$(dirname "$tokenizer_file")"
+			local endpoint="${HF_ENDPOINT:-https://huggingface.co}"
+			local tmp_file
+			tmp_file="$(mktemp "${tokenizer_file}.tmp.XXXXXX")"
+			if wget -O "$tmp_file" "${endpoint%/}/RLinf/openpi_tokenizer/resolve/main/big_vision/paligemma_tokenizer.model"; then
+				mv "$tmp_file" "$tokenizer_file"
+			else
+				rm -f "$tmp_file"
+				return 1
+			fi
+		fi
 	fi
 }
 
@@ -152,10 +102,6 @@ parse_args() {
 				IFS=',' read -r -a ASSETS <<<"$2"
 				shift 2
 				;;
-			--use-mirror)
-				USE_MIRRORS=1
-				shift
-				;;
 			--*)
 				echo "Unknown option: $1" >&2
 				echo "Use --help to see available options." >&2
@@ -177,8 +123,6 @@ main() {
 		echo "No assets specified. See --help for usage." >&2
 		exit 1
 	fi
-
-	setup_mirror
 
 	mkdir -p "$DOWNLOAD_DIR"
 

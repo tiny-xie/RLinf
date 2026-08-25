@@ -14,8 +14,9 @@
 
 """Receiver for the x2robot slave's always-on trajectory upload channel.
 
-The inference socket is mode-gated -- the slave drops it the instant
-``/running_mode`` leaves 1, so it never carries a takeover frame.  The slave's
+The inference socket is mode-gated -- the slave keeps it in policy modes 1 and
+3, and drops it in human takeover mode 2, so it never carries a takeover frame.
+The slave's
 ``dagger_uploader.DaggerUploader`` therefore opens a second, one-way socket
 that survives mode transitions and streams every 20 Hz tick of the episode.
 This class is the other end of it.
@@ -46,6 +47,8 @@ from typing import Any
 
 import cv2
 import numpy as np
+
+from rlinf.envs.realworld.x2robot.lerobot_recorder import X2RobotLeRobotRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +90,28 @@ class UploadServer:
         image_width: int = 640,
         maxlen: int = 4000,
         decode_images: bool = True,
+        lerobot_data_path: str | None = None,
+        task_description: str = "",
+        lerobot_fps: int = 20,
+        lerobot_queue_size: int = 4000,
     ):
         self.host = host
         self.port = port
         self.image_height = image_height
         self.image_width = image_width
         self.decode_images = decode_images
+        self.lerobot_recorder = (
+            X2RobotLeRobotRecorder(
+                lerobot_data_path,
+                task_description=task_description,
+                image_height=image_height,
+                image_width=image_width,
+                fps=lerobot_fps,
+                queue_size=lerobot_queue_size,
+            )
+            if lerobot_data_path
+            else None
+        )
 
         self._records: deque = deque(maxlen=maxlen)
         self._lock = threading.Lock()
@@ -107,6 +126,8 @@ class UploadServer:
 
     # ------------------------------------------------------------------ api
     def start(self) -> None:
+        if self.lerobot_recorder is not None:
+            self.lerobot_recorder.start()
         self._thread.start()
 
     @property
@@ -149,6 +170,8 @@ class UploadServer:
                 pass
         if self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        if self.lerobot_recorder is not None:
+            self.lerobot_recorder.close()
 
     # --------------------------------------------------------------- server
     def _serve(self) -> None:
@@ -201,6 +224,8 @@ class UploadServer:
             if kind == "episode_end":
                 with self._lock:
                     self._episode_end = header
+                if self.lerobot_recorder is not None:
+                    self.lerobot_recorder.finish_episode(header)
                 logger.info("episode_end: %s", header)
                 continue
 
@@ -210,7 +235,17 @@ class UploadServer:
 
             # Fixed 3 image frames follow every step record.
             blobs = [_read_frame(conn) for _ in range(3)]
+            if self.lerobot_recorder is not None:
+                self.lerobot_recorder.append_step(header, blobs)
             rec = self._build_record(header, blobs)
+            logger.info(
+                "upload step received: header=%s image_bytes=%s "
+                "parsed_mode=%d parsed_is_takeover=%s",
+                header,
+                tuple(len(blob) for blob in blobs),
+                rec["mode"],
+                rec["is_takeover"],
+            )
             with self._lock:
                 self._records.append(rec)
             self._n_recv += 1
@@ -223,11 +258,17 @@ class UploadServer:
         master = np.asarray(
             header["master1_pos"] + header["master2_pos"], dtype=np.float32
         )
+        # The currently deployed slave/uploader owns the takeover decision and
+        # sends it per frame.  Keep mode only as metadata; do not gate the human
+        # label on it because the legacy uploader's mode field is not yet wired
+        # to the new three-mode slave state machine.
+        mode = int(header.get("running_mode", header.get("mode", 1)))
+        is_takeover = bool(header.get("is_takeover", False))
         rec = {
             "seq": int(header.get("seq", -1)),
             "t": float(header.get("t", 0.0)),
-            "mode": int(header.get("mode", 1)),
-            "is_takeover": bool(header.get("is_takeover", False)),
+            "mode": mode,
+            "is_takeover": is_takeover,
             "slave_state": slave,  # (14,)
             "action_28": np.concatenate([slave, master]),  # (28,)
         }

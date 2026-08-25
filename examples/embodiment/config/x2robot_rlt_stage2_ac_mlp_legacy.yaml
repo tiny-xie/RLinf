@@ -42,10 +42,13 @@ runner:
 
 algorithm:
   update_epoch: 8
-  # Use the original replay-buffer training loop. Actor selection is manual:
-  # VLA is the default, and rlt_switch_flags explicitly selects Stage2.
   rlt_schedule:
-    enable: False
+    enable: True
+    max_updates_per_train_step: 400
+    warmup_min_size: 600
+    warmup_post_collect_updates: 20000
+    train_every_episodes: 0
+    train_every_transitions: 5
   group_size: 1
   agg_q: min
   actor_agg_q: q1
@@ -75,7 +78,7 @@ algorithm:
     cache_size: 2000
     min_buffer_size: 32
     sample_window_size: 2000
-    auto_save: True
+    auto_save: False
 
   target_update_freq: 1
   target_update_type: all
@@ -93,16 +96,11 @@ env:
     max_steps_per_rollout_epoch: 240
     # Match pi05_x2robot_sm2sm_rlt: [3 history, 1 current, 0 future].
     override_cfg:
-      port: 59771
-      upload_enabled: False
-      lerobot_record_enabled: False
       state_history_size: 3
       state_future_size: 0
       state_step: 1
       latency_step: 0
-    # running_mode=1 -> frozen VLA, 2 -> master-arm takeover, 3 -> Stage2 RLT.
-    # No signal defaults to VLA; takeover remains independent via intervene_flag.
-    rlt_default_actor_switch: False
+    rlt_default_actor_switch: True
   eval:
     rollout_epoch: 1
     total_num_envs: 1
@@ -141,7 +139,7 @@ rollout:
     precision: null
     is_lora: False
     # Replace with the actor directory produced by the legacy Stage1 YAML.
-    model_path: "/home/user/xty-RLinf/turtle-rlt/ckpt"
+    model_path: "/path/to/x2robot_rlt_stage1_sft_openpi_pi05_legacy/checkpoints/global_step_50000/actor"
     num_action_chunks: 20
     num_steps: 4
 
@@ -155,7 +153,7 @@ rollout:
       # transform sample contains actions, so rollout inference is deterministic.
       random_drop_history: 0.50
       random_image_aug: 0.60
-      norm_stats_path: "/home/user/xty-RLinf/turtle-rlt/ckpt/bagging_490_state4"
+      norm_stats_path: "/home/xietingying/turtle/openpi-RLT/assets/rlt_pi05_bagging_490_stage1/bagging_490_state4"
 
     openpi:
       config_name: "pi05_x2robot_sm2sm_rlt"

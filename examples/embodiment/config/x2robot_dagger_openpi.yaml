@@ -35,7 +35,7 @@ runner:
     log_path: "../results"
     project_name: rlinf
     experiment_name: "x2robot_dagger_openpi"
-    logger_backends: ["tensorboard"]
+    logger_backends: ["wandb"]
   max_epochs: 8000
   max_steps: -1
   only_eval: False
@@ -101,7 +101,7 @@ actor:
     # Same checkpoint the bridge serves for inference, and it must carry
     # assets/{asset_id}/norm_stats.json -- training and inference have to share
     # one normalization or the policy drifts.
-    model_path: "/path/to/x2robot/cfg_ckpt/global_step_30000"
+    model_path: "/home/user/xty-RLinf/turtle-rlt/ckpt"
     num_action_chunks: 20
     action_dim: 28
     add_value_head: False
@@ -111,7 +111,7 @@ actor:
     openpi:
       # Must be registered in rlinf/models/embodiment/openpi/dataconfig.
       # NOTE: pi0_realworld (the Franka default) is NOT registered here.
-      config_name: "clean_table_sm2sm"
+      config_name: "pi05_x2robot_sm2sm_rlt"
       num_images_in_input: 3
       train_expert_only: False
       detach_critic_input: True

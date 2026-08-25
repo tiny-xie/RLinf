@@ -51,11 +51,20 @@ override_cfg:
   connect_timeout: null       # wait forever for the robot
 
   # ── upload channel (always-on; carries the takeover frames) ──
-  # The inference socket is mode-gated and drops on takeover, so this second
-  # channel is what makes online DAgger possible at all.
+  # The inference socket stays connected in VLA/RLT modes 1 and 3, and drops
+  # on human takeover mode 2. This second channel is what makes online DAgger
+  # possible at all.
   upload_enabled: True
   upload_port: 57772
   upload_maxlen: 4000
+
+  # Save every 20 Hz upload frame to LeRobot independently from chunk-level
+  # RLT replay. Each frame has three images, task language, 32D state and its
+  # own intervene_flag copied directly from the robot's is_takeover field.
+  lerobot_record_enabled: True
+  lerobot_data_path: ${runner.logger.log_path}/lerobot
+  lerobot_fps: 20
+  lerobot_queue_size: 4000
 
   manual_episode_control_only: True
   expand_chunk_obs: True

@@ -22,8 +22,9 @@ whole chunk itself, so this subclass performs exactly one TCP round trip per
 
 Takeover data comes from the *second*, always-on upload channel
 (:class:`~rlinf.envs.realworld.x2robot.upload_server.UploadServer`).  The
-inference socket is mode-gated -- the slave drops it the moment
-``/running_mode`` leaves 1 -- so it can never carry a takeover frame.  The
+inference socket is mode-gated -- the slave keeps it for VLA/RLT modes 1 and 3,
+and drops it on human takeover mode 2 -- so it never carries a takeover frame.
+The
 uploader streams every 20 Hz tick regardless of mode; those records supply the
 per-sub-step **executed action** and ``is_takeover`` flag that RLinf's
 ``update_last_actions`` / ``extract_intervene_traj`` need.
@@ -66,6 +67,10 @@ class X2RobotTCPRealWorldEnv(RealWorldEnv):
         )
         self._last_obs = obs
         self._pending_success = None
+        if "rlt_switch_flags" in infos:
+            infos["rlt_switch_flags"] = to_tensor(
+                np.asarray(infos["rlt_switch_flags"], dtype=bool)
+            )
         return obs, infos
 
     def step(self, actions=None, auto_reset=True):
@@ -83,11 +88,12 @@ class X2RobotTCPRealWorldEnv(RealWorldEnv):
         # num_envs == 1 is asserted by RealWorldEnv.__init__.
         results = self.env.call("chunk_round_trip", chunk_actions[0])
         raw_obs, _reward, terminated, truncated, info = results[0]
+        disconnected = raw_obs is None
 
         self._elapsed_steps += 1
 
-        if raw_obs is None:
-            # Slave disconnected: takeover started (mode != 1) or the episode
+        if disconnected:
+            # Slave disconnected: takeover started (mode 2) or the episode
             # ended.  Reuse the last good observation so the trajectory closes
             # out cleanly rather than propagating a None.
             obs = self._last_obs
@@ -114,7 +120,6 @@ class X2RobotTCPRealWorldEnv(RealWorldEnv):
             logger.info("episode_end from slave: %s (upload records=%d)", end, n_recs)
 
         n = chunk_size if self.expand_chunk_obs else 1
-        obs_list = [obs] * n
 
         chunk_rewards = torch.zeros((self.num_envs, n), dtype=torch.float32)
         chunk_terminations = torch.zeros((self.num_envs, n), dtype=torch.bool)
@@ -144,6 +149,41 @@ class X2RobotTCPRealWorldEnv(RealWorldEnv):
         infos["intervene_action"] = intervene_action
         infos["intervene_flag"] = intervene_flag
         infos["n_upload_records"] = n_recs
+        if "running_mode" in info:
+            infos["running_mode"] = to_tensor(
+                np.asarray([info["running_mode"]], dtype=np.int64)
+            )
+        if "rlt_switch_flags" in info:
+            infos["rlt_switch_flags"] = torch.full(
+                (self.num_envs, n),
+                bool(info["rlt_switch_flags"]),
+                dtype=torch.bool,
+            )
+
+        # Human takeover disconnects the policy socket. Block here until the
+        # operator selects mode 1 or 3 and the slave reconnects with a fresh
+        # observation. This prevents a pre-takeover action chunk from being
+        # queued and sent immediately after control is released.
+        if disconnected and self.auto_reset:
+            obs, infos = self._handle_auto_reset(
+                np.ones(self.num_envs, dtype=bool), obs, infos
+            )
+            release_action, release_flag, release_recs = self._collect_intervene(
+                chunk_size, action_dim, chunk_actions[0]
+            )
+            if release_recs:
+                # The uploader remains active while the inference socket is
+                # disconnected. Prefer the latest human-controlled frames
+                # collected up to release, and attach them to the terminal
+                # chunk rather than the newly selected VLA/RLT chunk.
+                final_info = infos["final_info"]
+                final_info["intervene_action"] = release_action
+                final_info["intervene_flag"] = release_flag
+                final_info["n_upload_records"] = (
+                    int(final_info.get("n_upload_records", 0)) + release_recs
+                )
+
+        obs_list = [obs] * n
 
         infos_list = [infos] * n
         return (

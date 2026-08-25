@@ -111,6 +111,10 @@ class OpenPi0Config(Pi0Config):
     rlt_image_only: bool = True
     rlt_use_mask: bool = False
     state_indices: list[int] | None = None
+    # Optional time-axis selection for sequence proprio observations such as
+    # X2Robot's [history..., current] state input. This affects only the
+    # proprio returned to the Stage2 MLP; the full sequence still feeds PI0.5.
+    state_sequence_index: int | None = None
 
 
 class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
@@ -551,6 +555,24 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             return states.index_select(-1, index_tensor)
         return np.asarray(states)[..., indices]
 
+    def _select_proprio_state(self, states):
+        raw_proprio = self._select_configured_state(states)
+        index = self.config.state_sequence_index
+        if index is None:
+            return raw_proprio
+        if raw_proprio.ndim < 3:
+            raise ValueError(
+                "state_sequence_index requires batched sequence states with "
+                f"shape [B, T, D], got {tuple(raw_proprio.shape)}."
+            )
+        sequence_len = raw_proprio.shape[-2]
+        if not -sequence_len <= index < sequence_len:
+            raise IndexError(
+                f"state_sequence_index={index} is out of range for "
+                f"sequence length {sequence_len}."
+            )
+        return raw_proprio[..., index, :]
+
     @torch.no_grad()
     def extract_rlt_obs(
         self,
@@ -590,7 +612,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         ref_chunk = self.output_transform(
             {"actions": outputs["actions"], "state": observation.state}
         )["actions"]
-        raw_proprio = self._select_configured_state(env_obs["states"])
+        raw_proprio = self._select_proprio_state(env_obs["states"])
         if (
             isinstance(self.config.config_name, str)
             and "maniskill" in self.config.config_name.lower()
@@ -649,9 +671,9 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             observation = _model.Observation.from_dict(processed_obs)
             register_pytree_dataclasses(observation)
             observation = tree_map(
-                lambda value: torch.as_tensor(value, device=device)
-                .contiguous()
-                .clone(),
+                lambda value: (
+                    torch.as_tensor(value, device=device).contiguous().clone()
+                ),
                 observation,
             )
             return {
