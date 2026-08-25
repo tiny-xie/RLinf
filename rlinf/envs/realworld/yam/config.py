@@ -40,6 +40,7 @@ class DualYamJointEnvConfig:
     step_frequency: float = 30.0
     max_num_steps: int = 1000
     max_joint_delta: float = 0.08
+    enforce_runtime_joint_limits: bool = True
     joint_limit_min: list[list[float]] = field(default_factory=_default_joint_limit_min)
     joint_limit_max: list[list[float]] = field(default_factory=_default_joint_limit_max)
     feedback_timeout_s: float = 0.25
@@ -59,6 +60,8 @@ class DualYamJointEnvConfig:
             raise TypeError("is_dummy must be a bool")
         if not isinstance(self.manual_episode_control_only, bool):
             raise TypeError("manual_episode_control_only must be a bool")
+        if not isinstance(self.enforce_runtime_joint_limits, bool):
+            raise TypeError("enforce_runtime_joint_limits must be a bool")
         self.step_frequency = float(self.step_frequency)
         self.max_joint_delta = float(self.max_joint_delta)
         self.feedback_timeout_s = float(self.feedback_timeout_s)
@@ -126,6 +129,7 @@ class YamLeaderInterventionConfig:
 
     wait_for_record_button: bool = True
     sync_on_reset: bool = False
+    preserve_sync_between_episodes: bool = False
     poll_frequency: float = 30.0
     button_debounce_s: float = 0.2
     unsynced_action_source: str = "hold"
@@ -135,6 +139,8 @@ class YamLeaderInterventionConfig:
             raise TypeError("wait_for_record_button must be a bool")
         if not isinstance(self.sync_on_reset, bool):
             raise TypeError("sync_on_reset must be a bool")
+        if not isinstance(self.preserve_sync_between_episodes, bool):
+            raise TypeError("preserve_sync_between_episodes must be a bool")
         self.poll_frequency = float(self.poll_frequency)
         self.button_debounce_s = float(self.button_debounce_s)
         if not np.isfinite(self.poll_frequency) or self.poll_frequency <= 0:

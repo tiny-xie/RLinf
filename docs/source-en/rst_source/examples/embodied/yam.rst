@@ -176,7 +176,14 @@ The reusable environment defaults are in
 single-node collection example is
 ``examples/embodiment/config/realworld_dual_yam_collect_data.yaml``.
 
-Export the required per-station values before starting collection:
+The collection example uses official i2rt auto-calibration by setting each
+follower's ``gripper_limits`` to ``null``. On every startup, each follower
+moves its gripper in both directions to detect the current ``[closed, open]``
+motor range. Keep both grippers completely unobstructed until calibration
+finishes.
+
+For a station that deliberately skips startup calibration, replace ``null``
+with measured per-station values ordered as ``[closed, open]``:
 
 .. code-block:: bash
 
@@ -192,9 +199,11 @@ Export the required per-station values before starting collection:
    export YAM_LEFT_CAMERA_SERIAL=<left-serial>
    export YAM_RIGHT_CAMERA_SERIAL=<right-serial>
 
-Do not estimate the gripper stops. They are raw motor-radian endpoints, not the
-normalized ``[0, 1]`` action. Their order carries the motor direction, so a
-valid ``[closed, open]`` pair can be decreasing.
+Do not estimate fixed gripper stops. They are raw motor-radian endpoints, not
+the normalized ``[0, 1]`` action. Their order carries the motor direction, so a
+valid ``[closed, open]`` pair can be decreasing. Fixed multi-turn limits must
+also use the encoder revolution active at startup; prefer auto-calibration
+unless the installed i2rt build aligns persisted limits to that revolution.
 
 If your CAN aliases differ from the defaults, export the four optional variables
 from the table above. All four resolved names must be unique. Camera names and
@@ -312,15 +321,17 @@ whole dual-arm station.
      - Start a new recorded episode at the current pose.
    * - Record / second button
      - Recording
-     - End the episode as a success with reward ``1`` and release active bilateral feedback.
+     - End the episode as a success with reward ``1`` while keeping teleoperation synchronized for the next episode.
    * - Teaching trigger
      - Default mapping
      - Released is gripper ``1`` (open); pressed is ``0`` (closed). Set ``gripper_invert: true`` per leader to reverse it.
 
-The example uses ``sync_on_reset: false``: press the top button when you are
-ready to take control. It also uses ``unsynced_action_source: hold``, so the
-collector's placeholder zero action can never send the followers toward zero.
-Button events are rising-edge-triggered and debounced.
+The example uses ``sync_on_reset: false``: press the top button once when you
+are ready to take control. ``preserve_sync_between_episodes: true`` makes the
+record button split episodes without releasing that control; only the top
+button toggles synchronization. It also uses ``unsynced_action_source: hold``,
+so the collector's placeholder zero action can never send the followers toward
+zero. Button events are rising-edge-triggered and debounced.
 
 Observation and Action Contract
 -------------------------------
@@ -333,11 +344,14 @@ Every state and action uses the same absolute 14-D layout:
     right_q0, ..., right_q5, right_gripper]
 
 Arm joints are radians. Grippers are normalized to ``0=closed, 1=open``.
-Observations contain measured follower positions. Before dispatch, commands are
-checked for the exact shape and finite values, clipped to configured hard limits,
-limited by ``max_joint_delta`` relative to the measured pose, and clipped to the
-gripper range. During collection, the wrapper reports the accepted target as
-``intervene_action`` so the recorded expert action matches what RLinf accepted.
+Observations contain measured follower positions. Commands are always checked
+for the exact shape and finite values, and grippers are clipped to their valid
+range. By default, arm commands are also clipped to the configured limits and
+limited by ``max_joint_delta`` relative to the measured pose. The collection
+example sets ``enforce_runtime_joint_limits: false`` to match the legacy
+yam-abc teleoperation path: after smooth engagement, leader joints pass directly
+to i2rt, which applies its hardware limits. The wrapper reports the resulting
+target as ``intervene_action``.
 
 Camera and dataset names change at three deliberate boundaries:
 

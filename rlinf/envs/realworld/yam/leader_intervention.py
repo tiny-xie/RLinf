@@ -44,6 +44,7 @@ class DualYamLeaderIntervention(gym.Wrapper):
         self.config = YamLeaderInterventionConfig(**dict(config or {}))
         self._recording = False
         self._sync_enabled = False
+        self._preserve_sync_on_next_reset = False
         self._previous_buttons = (False, False)
         self._last_button_edge_s = [-math.inf, -math.inf]
 
@@ -55,20 +56,26 @@ class DualYamLeaderIntervention(gym.Wrapper):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Reset episode state, then optionally wait for the record button."""
         try:
+            preserve_sync = bool(
+                self._sync_enabled and self._preserve_sync_on_next_reset
+            )
+            self._preserve_sync_on_next_reset = False
             # A caller may reset early, before a normal done transition. Never
-            # carry bilateral feedback across the potentially slow base reset.
-            if self._sync_enabled:
+            # carry bilateral feedback across it unless the preceding manual
+            # record boundary explicitly requested legacy continuous teleop.
+            if self._sync_enabled and not preserve_sync:
                 self._disable_sync()
             observation, info = self.env.reset(seed=seed, options=options)
             runtime = self._base_env.runtime
             runtime.connect_leaders()
-            runtime.release_leader_feedback()
+            if not preserve_sync:
+                runtime.release_leader_feedback()
             _, self._previous_buttons = runtime.read_leader_action()
             self._last_button_edge_s = [-math.inf, -math.inf]
             self._recording = not self.config.wait_for_record_button
-            self._sync_enabled = False
+            self._sync_enabled = preserve_sync
 
-            if self.config.sync_on_reset:
+            if self.config.sync_on_reset and not self._sync_enabled:
                 runtime.engage()
                 self._sync_enabled = True
 
@@ -135,13 +142,25 @@ class DualYamLeaderIntervention(gym.Wrapper):
                     self._recording = True
                     record_reset = True
 
-            # Hand ownership back immediately when either the environment or
-            # the teaching handle ends an episode. Dataset serialization can
-            # otherwise leave bilateral PD latched for an unbounded interval.
-            if (terminated or truncated) and self._sync_enabled:
+            preserve_manual_sync = bool(
+                manual_done
+                and not truncated
+                and self._sync_enabled
+                and self.config.preserve_sync_between_episodes
+            )
+            self._preserve_sync_on_next_reset = preserve_manual_sync
+            # Automatic environment endings still hand ownership back
+            # immediately. A configured manual recording boundary preserves
+            # synchronization across the collector's following reset.
+            if (
+                (terminated or truncated)
+                and self._sync_enabled
+                and not preserve_manual_sync
+            ):
                 self._disable_sync()
         except Exception:
             self._sync_enabled = False
+            self._preserve_sync_on_next_reset = False
             try:
                 runtime.emergency_hold()
             except Exception:  # pragma: no cover - hardware failure path

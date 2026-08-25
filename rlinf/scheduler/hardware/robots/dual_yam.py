@@ -121,10 +121,11 @@ class YamDeviceConfig:
     measured value only when that device's end effector has been calibrated.
     """
 
-    gripper_limits: tuple[float, float]
-    """Calibrated motor-radian stops ordered as ``(closed, open)``.
+    gripper_limits: Optional[tuple[float, float]]
+    """Optional motor-radian stops ordered as ``(closed, open)``.
 
     The order carries the motor direction and therefore must not be sorted.
+    ``None`` asks i2rt to detect both stops when the device connects.
     """
 
     arm_type: str = "yam"
@@ -177,24 +178,25 @@ class YamDeviceConfig:
         if self.ee_mass is not None:
             self.ee_mass = _finite_float(self.ee_mass, field_name="ee_mass")
             if self.ee_mass < 0.0:
-                raise ValueError(
-                    f"'ee_mass' must be non-negative, got {self.ee_mass}."
-                )
+                raise ValueError(f"'ee_mass' must be non-negative, got {self.ee_mass}.")
 
-        limits = list(_as_sequence(self.gripper_limits, field_name="gripper_limits"))
-        if len(limits) != 2:
-            raise ValueError(
-                "'gripper_limits' must contain exactly [closed, open], "
-                f"but got {len(limits)} values."
+        if self.gripper_limits is not None:
+            limits = list(
+                _as_sequence(self.gripper_limits, field_name="gripper_limits")
             )
-        closed = _finite_float(limits[0], field_name="gripper_limits[0]")
-        opened = _finite_float(limits[1], field_name="gripper_limits[1]")
-        if closed == opened:
-            raise ValueError(
-                "'gripper_limits' closed and open stops must differ, "
-                f"but both are {closed}."
-            )
-        self.gripper_limits = (closed, opened)
+            if len(limits) != 2:
+                raise ValueError(
+                    "'gripper_limits' must contain exactly [closed, open], "
+                    f"but got {len(limits)} values."
+                )
+            closed = _finite_float(limits[0], field_name="gripper_limits[0]")
+            opened = _finite_float(limits[1], field_name="gripper_limits[1]")
+            if closed == opened:
+                raise ValueError(
+                    "'gripper_limits' closed and open stops must differ, "
+                    f"but both are {closed}."
+                )
+            self.gripper_limits = (closed, opened)
 
         self.gravity_comp_factor = _optional_joint_vector(
             self.gravity_comp_factor,

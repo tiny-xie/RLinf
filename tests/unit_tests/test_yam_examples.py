@@ -37,15 +37,9 @@ _COLLECT_CONFIG = (
     / "realworld_dual_yam_collect_data.yaml"
 )
 _INSTALL_SCRIPT = _REPO_ROOT / "requirements" / "install.sh"
-_YAM_REQUIREMENTS = (
-    _REPO_ROOT / "requirements" / "embodied" / "envs" / "yam.txt"
-)
+_YAM_REQUIREMENTS = _REPO_ROOT / "requirements" / "embodied" / "envs" / "yam.txt"
 _YAM_BUILD_CONSTRAINTS = (
-    _REPO_ROOT
-    / "requirements"
-    / "embodied"
-    / "envs"
-    / "yam-build-constraints.txt"
+    _REPO_ROOT / "requirements" / "embodied" / "envs" / "yam-build-constraints.txt"
 )
 
 
@@ -84,11 +78,21 @@ def test_dual_yam_collection_example_declares_one_complete_station():
         station["right_leader"],
     ]
     assert len({device["channel"] for device in devices}) == 4
-    assert all(len(device["gripper_limits"]) == 2 for device in devices)
+    assert station["left_follower"]["gripper_limits"] is None
+    assert station["right_follower"]["gripper_limits"] is None
+    assert len(station["left_leader"]["gripper_limits"]) == 2
+    assert len(station["right_leader"]["gripper_limits"]) == 2
+    assert station["left_leader"]["gripper_invert"] is False
+    assert station["right_leader"]["gripper_invert"] is False
     assert [camera["name"] for camera in station["cameras"]] == [
         "top_rgb",
         "left_rgb",
         "right_rgb",
+    ]
+    assert [camera["serial"] for camera in station["cameras"]] == [
+        "260322277483",
+        "260322272602",
+        "260422273719",
     ]
 
     eval_config = config["env"]["eval"]
@@ -96,7 +100,9 @@ def test_dual_yam_collection_example_declares_one_complete_station():
     collection = eval_config["data_collection"]
     assert eval_config["max_episode_steps"] == 10000
     assert eval_config["override_cfg"]["manual_episode_control_only"] is True
+    assert eval_config["override_cfg"]["enforce_runtime_joint_limits"] is False
     assert intervention["enabled"] is True
+    assert intervention["preserve_sync_between_episodes"] is True
     assert intervention["unsynced_action_source"] == "hold"
     assert collection["export_format"] == "lerobot"
     assert collection["robot_type"] == "dual_yam"
@@ -118,10 +124,10 @@ def test_yam_install_target_bundles_the_pinned_i2rt_sdk():
     requirements_text = _YAM_REQUIREMENTS.read_text(encoding="utf-8")
     build_constraints_text = _YAM_BUILD_CONSTRAINTS.read_text(encoding="utf-8")
 
-    assert 'yam)' in install_text
-    assert 'install_yam_env' in install_text
-    assert 'embodied/envs/yam.txt' in install_text
-    assert 'embodied/envs/yam-build-constraints.txt' in install_text
+    assert "yam)" in install_text
+    assert "install_yam_env" in install_text
+    assert "embodied/envs/yam.txt" in install_text
+    assert "embodied/envs/yam-build-constraints.txt" in install_text
     assert "yam-abc-reproduce" not in install_text.lower()
     assert "i2rt @ git+https://github.com/i2rt-robotics/i2rt.git@" in requirements_text
     assert "47fee5e7dec4e30ca054f798bda1c8894b465ed2" in requirements_text

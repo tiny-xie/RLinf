@@ -200,3 +200,72 @@ def test_base_done_immediately_releases_leader_feedback(monkeypatch):
     assert not env._sync_enabled
     assert not info["yam_sync_enabled"]
     assert runtime.release_calls == 2  # reset plus done handoff
+
+
+def test_manual_record_boundary_preserves_sync_across_reset(monkeypatch):
+    runtime = _Runtime()
+    base_env = DualYamJointEnv(
+        override_cfg={"is_dummy": True, "dummy_camera_names": ["top_rgb"]},
+        runtime=runtime,
+    )
+    monkeypatch.setattr(base_env, "_pace", lambda: None)
+    env = DualYamLeaderIntervention(
+        base_env,
+        {
+            "wait_for_record_button": False,
+            "button_debounce_s": 0.0,
+            "preserve_sync_between_episodes": True,
+            "unsynced_action_source": "hold",
+        },
+    )
+    env.reset()
+
+    runtime.buttons = (True, False)
+    env.step(np.zeros(14))
+    runtime.buttons = (False, False)
+    env.step(np.zeros(14))
+    runtime.buttons = (False, True)
+
+    _, _, terminated, truncated, info = env.step(np.zeros(14))
+
+    assert terminated
+    assert not truncated
+    assert info["manual_done"]
+    assert info["yam_sync_enabled"]
+    assert env._sync_enabled
+    assert runtime.release_calls == 1
+
+    env.reset()
+
+    assert env._sync_enabled
+    assert runtime.engage_calls == 1
+    assert runtime.release_calls == 1
+
+
+def test_early_reset_still_releases_sync_in_continuous_mode(monkeypatch):
+    runtime = _Runtime()
+    base_env = DualYamJointEnv(
+        override_cfg={"is_dummy": True, "dummy_camera_names": ["top_rgb"]},
+        runtime=runtime,
+    )
+    monkeypatch.setattr(base_env, "_pace", lambda: None)
+    env = DualYamLeaderIntervention(
+        base_env,
+        {
+            "wait_for_record_button": False,
+            "button_debounce_s": 0.0,
+            "preserve_sync_between_episodes": True,
+            "unsynced_action_source": "hold",
+        },
+    )
+    env.reset()
+    runtime.buttons = (True, False)
+    env.step(np.zeros(14))
+
+    env.reset()
+
+    assert not env._sync_enabled
+    # One hold initializes the base environment; the second safely disables
+    # synchronization when reset occurs before an episode boundary.
+    assert runtime.hold_calls == 2
+    assert runtime.release_calls == 3

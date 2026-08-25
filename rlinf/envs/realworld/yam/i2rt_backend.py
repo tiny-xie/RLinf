@@ -22,6 +22,7 @@ therefore works on training nodes that do not have the robot SDK installed.
 from __future__ import annotations
 
 import inspect
+import threading
 import time
 from typing import Any
 
@@ -59,8 +60,10 @@ def _build_yam(device_config: Any, *, zero_gravity_mode: bool) -> Any:
         "gripper_type": GripperType.from_string_name(device_config.gripper_type),
         "zero_gravity_mode": zero_gravity_mode,
         "ee_mass": device_config.ee_mass,
-        "gripper_limits_override": np.asarray(
-            device_config.gripper_limits, dtype=np.float64
+        "gripper_limits_override": (
+            None
+            if device_config.gripper_limits is None
+            else np.asarray(device_config.gripper_limits, dtype=np.float64)
         ),
         "enable_auto_recovery": device_config.enable_auto_recovery,
         "use_coulomb_friction": device_config.use_coulomb_friction,
@@ -105,6 +108,7 @@ class _I2RTYamBackend:
         self.device_config = device_config
         self._zero_gravity_mode = zero_gravity_mode
         self._robot: Any | None = None
+        self._control_thread: threading.Thread | None = None
         self._closed = False
 
     def connect(self) -> None:
@@ -115,6 +119,7 @@ class _I2RTYamBackend:
                 self.device_config,
                 zero_gravity_mode=self._zero_gravity_mode,
             )
+            self._control_thread = self._find_control_thread(self._robot)
 
     def assert_healthy(self, max_feedback_age_s: float) -> None:
         robot = self._require_robot()
@@ -144,9 +149,63 @@ class _I2RTYamBackend:
             self._closed = True
             return
         # Preserve the handle if cleanup fails so a later close() can retry.
+        self._stop_i2rt_threads(robot)
         robot.close()
         self._robot = None
+        self._control_thread = None
         self._closed = True
+
+    def _stop_i2rt_threads(self, robot: Any) -> None:
+        """Stop i2rt workers before its unjoined CAN socket close.
+
+        The pinned official i2rt build joins the robot-server thread but closes
+        the SocketCAN descriptor immediately after setting ``chain.running`` to
+        false. Its CAN control thread can consequently still be inside
+        ``bus.recv`` and report ``fd=-1``. Stop and join that thread first while
+        retaining compatibility with builds that already expose the handle.
+        """
+        stop_event = getattr(robot, "_stop_event", None)
+        server_thread = getattr(robot, "_server_thread", None)
+        chain = getattr(robot, "motor_chain", None)
+        if stop_event is None or server_thread is None or chain is None:
+            return
+
+        stop_event.set()
+        server_thread.join(timeout=2.0)
+        if server_thread.is_alive():
+            raise RuntimeError("i2rt robot server did not stop; CAN was left open")
+
+        chain.running = False
+        control_thread = self._control_thread
+        if (
+            control_thread is not None
+            and control_thread is not threading.current_thread()
+        ):
+            control_thread.join(timeout=2.0)
+            if control_thread.is_alive():
+                raise RuntimeError(
+                    "i2rt CAN control thread did not stop; socket was left open"
+                )
+
+    @staticmethod
+    def _find_control_thread(robot: Any) -> threading.Thread | None:
+        """Locate the CAN worker hidden by official i2rt builds."""
+        chain = getattr(robot, "motor_chain", None)
+        if chain is None:
+            return None
+        exposed = getattr(chain, "_control_thread", None)
+        if exposed is not None and all(
+            callable(getattr(exposed, name, None)) for name in ("join", "is_alive")
+        ):
+            return exposed
+        for candidate in threading.enumerate():
+            target = getattr(candidate, "_target", None)
+            if (
+                getattr(target, "__self__", None) is chain
+                and getattr(target, "__name__", "") == "_set_torques_and_update_state"
+            ):
+                return candidate
+        return None
 
     def _require_robot(self) -> Any:
         if self._robot is None:
@@ -251,8 +310,9 @@ class I2RTYamLeader(_I2RTYamBackend):
             raise RuntimeError("YAM teaching-handle feedback is not available yet")
         encoder = encoder_states[0]
         trigger = float(np.clip(encoder.position, 0.0, 1.0))
-        # Default i2rt convention: released trigger -> open (1), pressed ->
-        # closed (0). gripper_invert deliberately reverses that mapping.
+        # The station's teaching handle reports released near 0 and pressed
+        # near 1, while follower commands use 0=closed and 1=open. An explicit
+        # per-device override reverses that default mapping.
         gripper = trigger if self.device_config.gripper_invert else 1.0 - trigger
         raw_buttons = tuple(bool(value) for value in encoder.io_inputs)
         if len(raw_buttons) != 2:

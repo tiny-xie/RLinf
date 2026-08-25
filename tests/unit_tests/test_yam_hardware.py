@@ -110,6 +110,17 @@ def test_gripper_limits_preserve_a_descending_closed_to_open_calibration():
     assert device.gripper_limits == (1.2, -0.4)
 
 
+def test_gripper_limits_allow_i2rt_auto_calibration():
+    device = YamDeviceConfig(
+        channel="can0",
+        gripper_type="flexible_4310",
+        ee_mass=None,
+        gripper_limits=None,
+    )
+
+    assert device.gripper_limits is None
+
+
 def test_gripper_limits_reject_identical_closed_and_open_stops():
     with pytest.raises(ValueError, match="closed and open stops must differ"):
         YamDeviceConfig(

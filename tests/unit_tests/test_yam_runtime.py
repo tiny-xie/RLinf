@@ -252,6 +252,86 @@ def test_command_applies_joint_limits_slew_limits_and_gripper_bounds():
     np.testing.assert_allclose(factory.followers[1].commands, [expected_right])
 
 
+def test_command_can_match_legacy_direct_teleop_mapping():
+    config = DualYamJointEnvConfig(
+        enforce_runtime_joint_limits=False,
+        max_joint_delta=0.01,
+        joint_limit_min=[[-1.0] * 6, [-1.0] * 6],
+        joint_limit_max=[[1.0] * 6, [1.0] * 6],
+    )
+    left = np.array([1.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5])
+    right = np.array([-1.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5])
+    runtime, factory = _runtime(config=config, hardware=_hardware(left, right))
+    runtime.connect_followers()
+    requested_left = np.array([2.0, 0.2, 0.3, 0.4, 0.5, 0.6, 2.0])
+    requested_right = np.array([-2.0, -0.2, -0.3, -0.4, -0.5, -0.6, -1.0])
+    requested = np.concatenate([requested_left, requested_right])
+
+    result = runtime.command(requested)
+
+    expected_left = requested_left.copy()
+    expected_left[-1] = 1.0
+    expected_right = requested_right.copy()
+    expected_right[-1] = 0.0
+    np.testing.assert_allclose(factory.followers[0].commands, [expected_left])
+    np.testing.assert_allclose(factory.followers[1].commands, [expected_right])
+    np.testing.assert_allclose(
+        result.accepted, np.concatenate([expected_left, expected_right])
+    )
+    assert result.rejection_reason is None
+    assert result.clipped
+
+
+def test_i2rt_close_joins_hidden_can_thread_before_closing_socket(monkeypatch):
+    events = []
+
+    class _Event:
+        def set(self):
+            events.append("stop_server")
+
+    class _Thread:
+        def __init__(self, name):
+            self.name = name
+            self.alive = True
+
+        def join(self, timeout=None):
+            events.append(("join", self.name, timeout))
+            self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+    server = _Thread("server")
+    control = _Thread("control")
+
+    class _Robot:
+        _stop_event = _Event()
+        _server_thread = server
+        motor_chain = SimpleNamespace(running=True, _control_thread=control)
+
+        def close(self):
+            assert not server.is_alive()
+            assert not control.is_alive()
+            events.append("close_socket")
+
+    monkeypatch.setattr(
+        i2rt_backend,
+        "_build_yam",
+        lambda device_config, *, zero_gravity_mode: _Robot(),
+    )
+    backend = i2rt_backend.I2RTYamFollower(SimpleNamespace(channel="can_left"))
+    backend.connect()
+
+    backend.close()
+
+    assert events == [
+        "stop_server",
+        ("join", "server", 2.0),
+        ("join", "control", 2.0),
+        "close_socket",
+    ]
+
+
 def test_non_finite_action_holds_measured_pose_without_forwarding_the_action():
     left = np.array([0.2, 0.1, 0.0, -0.1, -0.2, -0.3, 0.8])
     right = np.array([-0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4])
@@ -324,3 +404,44 @@ def test_i2rt_backends_select_safe_role_specific_startup_modes(monkeypatch):
     i2rt_backend.I2RTYamLeader(device).connect()
 
     assert startup_modes == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("gripper_invert", "expected_gripper"),
+    [(False, 0.2), (True, 0.8)],
+)
+def test_i2rt_leader_maps_released_trigger_to_open_by_default(
+    monkeypatch, gripper_invert, expected_gripper
+):
+    class _MotorChain:
+        def get_same_bus_device_states(self):
+            return [SimpleNamespace(position=0.8, io_inputs=(False, False))]
+
+    class _Robot:
+        motor_chain = _MotorChain()
+        _joint_state = SimpleNamespace(timestamp=100.0)
+
+        def get_robot_info(self):
+            return {"kp": np.ones(6)}
+
+        def update_kp_kd(self, *, kp, kd):
+            del kp, kd
+
+        def get_joint_pos(self):
+            return np.zeros(6)
+
+    monkeypatch.setattr(
+        i2rt_backend,
+        "_build_yam",
+        lambda device_config, *, zero_gravity_mode: _Robot(),
+    )
+    device = SimpleNamespace(
+        bilateral_kp=0.0,
+        gripper_invert=gripper_invert,
+    )
+    leader = i2rt_backend.I2RTYamLeader(device)
+    leader.connect()
+
+    state = leader.read_state()
+
+    assert state.arm.gripper_position == pytest.approx(expected_gripper)

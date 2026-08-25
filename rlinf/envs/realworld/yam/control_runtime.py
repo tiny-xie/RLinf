@@ -179,11 +179,13 @@ class YamControlRuntime:
         return action, buttons
 
     def command(self, action: Any) -> YamCommandResult:
-        """Validate, limit, and synchronously dispatch one dual-arm target.
+        """Validate and synchronously dispatch one dual-arm target.
 
         Shape errors are rejected before reading or writing hardware. Non-finite
         targets trigger an explicit measured-pose hold and are reported without
-        forwarding the invalid values.
+        forwarding the invalid values. Runtime joint limits are optional so YAM
+        teleoperation can retain the legacy direct leader-to-follower mapping
+        and leave final joint clipping to i2rt.
         """
         left_requested, right_requested = split_dual_action(action)
         requested = pack_dual_action(left_requested, right_requested)
@@ -213,23 +215,26 @@ class YamControlRuntime:
             zip(requested_arms, current, strict=True)
         ):
             accepted = target.copy()
-            lower = self.config.joint_limit_min[arm_index]
-            upper = self.config.joint_limit_max[arm_index]
-            if np.any(current_arm[:NUM_ARM_JOINTS] < lower) or np.any(
-                current_arm[:NUM_ARM_JOINTS] > upper
-            ):
-                self._best_effort_hold()
-                return YamCommandResult(
-                    requested=requested,
-                    accepted=current_vector,
-                    rejection_reason="measured_joint_out_of_limits",
+            if self.config.enforce_runtime_joint_limits:
+                lower = self.config.joint_limit_min[arm_index]
+                upper = self.config.joint_limit_max[arm_index]
+                if np.any(current_arm[:NUM_ARM_JOINTS] < lower) or np.any(
+                    current_arm[:NUM_ARM_JOINTS] > upper
+                ):
+                    self._best_effort_hold()
+                    return YamCommandResult(
+                        requested=requested,
+                        accepted=current_vector,
+                        rejection_reason="measured_joint_out_of_limits",
+                    )
+                accepted[:NUM_ARM_JOINTS] = np.clip(
+                    accepted[:NUM_ARM_JOINTS], lower, upper
                 )
-            accepted[:NUM_ARM_JOINTS] = np.clip(accepted[:NUM_ARM_JOINTS], lower, upper)
-            accepted[:NUM_ARM_JOINTS] = np.clip(
-                accepted[:NUM_ARM_JOINTS],
-                current_arm[:NUM_ARM_JOINTS] - self.config.max_joint_delta,
-                current_arm[:NUM_ARM_JOINTS] + self.config.max_joint_delta,
-            )
+                accepted[:NUM_ARM_JOINTS] = np.clip(
+                    accepted[:NUM_ARM_JOINTS],
+                    current_arm[:NUM_ARM_JOINTS] - self.config.max_joint_delta,
+                    current_arm[:NUM_ARM_JOINTS] + self.config.max_joint_delta,
+                )
             accepted[-1] = np.clip(accepted[-1], 0.0, 1.0)
             accepted_arms.append(accepted)
 
