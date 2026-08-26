@@ -49,6 +49,12 @@ class RoboTwinEnv(gym.Env):
         self.auto_reset = cfg.auto_reset
         self.use_rel_reward = cfg.use_rel_reward
         self.ignore_terminations = cfg.ignore_terminations
+        self.action_execution_mode = cfg.get("action_execution_mode", "chunk")
+        if self.action_execution_mode not in {"chunk", "take_action"}:
+            raise ValueError(
+                "RoboTwin action_execution_mode must be 'chunk' or "
+                f"'take_action', got {self.action_execution_mode!r}."
+            )
 
         self.group_size = cfg.group_size
         self.num_group = self.num_envs // self.group_size
@@ -216,6 +222,28 @@ class RoboTwinEnv(gym.Env):
         else:
             return reward
 
+    def _cal_chunk_rewards(self, step_reward, chunk_step, terminations, infos):
+        n_steps_to_run = np.array(
+            [[0] for _ in range(self.num_envs)]
+        )  # infos.get("n_steps_to_run", np.zeros((self.num_envs, 1)))
+
+        n_steps_to_run = torch.as_tensor(
+            np.array(n_steps_to_run).reshape(-1), device=self.device
+        )
+        chunk_rewards = torch.zeros(self.num_envs, chunk_step, device=self.device)
+        for env_id in range(self.num_envs):
+            steps_left = n_steps_to_run[env_id]
+            reward = step_reward[env_id]
+            start_idx = chunk_step - steps_left - 1
+
+            if terminations[env_id] and start_idx > 0:
+                if self.use_rel_reward:
+                    chunk_rewards[env_id, start_idx] = reward
+                else:
+                    chunk_rewards[env_id, start_idx:] = reward
+
+        return chunk_rewards
+
     def reset(
         self,
         env_idx: Optional[Union[int, list[int]]] = None,
@@ -255,6 +283,59 @@ class RoboTwinEnv(gym.Env):
         raw_obs, step_reward, terminations, truncations, info_list = self.venv.step(
             actions
         )
+        return self._process_step_result(
+            raw_obs,
+            step_reward,
+            terminations,
+            truncations,
+            info_list,
+            num_steps=actions.shape[1],
+            auto_reset=auto_reset,
+        )
+
+    def single_step(
+        self, actions: Union[torch.Tensor, np.ndarray, dict], auto_reset=True
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        """Execute one target with RoboTwin's ``take_action`` controller."""
+        if isinstance(actions, torch.Tensor):
+            actions = actions.cpu().numpy()
+        elif isinstance(actions, dict):
+            actions = actions.get("actions", actions)
+
+        if actions.ndim != 2:
+            raise ValueError(
+                "RoboTwin single_step expects [num_envs, action_dim], "
+                f"got {actions.shape}."
+            )
+        if not hasattr(self.venv, "step_single"):
+            raise RuntimeError(
+                "RoboTwin VectorEnv.step_single is unavailable. Update the "
+                "RoboTwin RLinf_support checkout with the single-step adapter."
+            )
+
+        raw_obs, step_reward, terminations, truncations, info_list = (
+            self.venv.step_single(actions)
+        )
+        return self._process_step_result(
+            raw_obs,
+            step_reward,
+            terminations,
+            truncations,
+            info_list,
+            num_steps=1,
+            auto_reset=auto_reset,
+        )
+
+    def _process_step_result(
+        self,
+        raw_obs,
+        step_reward,
+        terminations,
+        truncations,
+        info_list,
+        num_steps,
+        auto_reset,
+    ):
         extracted_obs = self._extract_obs_image(raw_obs)
         infos = list_of_dict_to_dict_of_list(info_list)
 
@@ -276,7 +357,7 @@ class RoboTwinEnv(gym.Env):
                     device=self.device,
                 )
 
-        self._elapsed_steps += actions.shape[1]
+        self._elapsed_steps += num_steps
         truncated = self._elapsed_steps >= self.cfg.max_episode_steps
         if truncated.any():
             truncations = torch.logical_or(truncated, truncations)
@@ -298,12 +379,67 @@ class RoboTwinEnv(gym.Env):
         return extracted_obs, step_reward, terminations, truncations, infos
 
     def chunk_step(self, chunk_actions):
-        """Execute an action chunk while retaining every frame-level transition.
+        """Execute a chunk using the configured RoboTwin controller."""
+        if isinstance(chunk_actions, torch.Tensor):
+            chunk_actions = chunk_actions.cpu().numpy()
 
-        RoboTwin accepts an action horizon but returns only the observation after
-        the complete horizon. Online LeRobot DAgger needs one observation for
-        every action, so execute one-action horizons through :meth:`step` and
-        aggregate their outputs here.
+        if self.action_execution_mode == "take_action":
+            return self._single_action_chunk_step(chunk_actions)
+        return self._planned_chunk_step(chunk_actions)
+
+    def _planned_chunk_step(self, chunk_actions):
+        """Execute the complete chunk through one continuous TOPP plan."""
+        num_envs, chunk_size = chunk_actions.shape[:2]
+        raw_obs, step_reward, terminations, truncations, info_list = self.venv.step(
+            chunk_actions
+        )
+        extracted_obs, step_reward, terminations, truncations, infos = (
+            self._process_step_result(
+                raw_obs,
+                step_reward,
+                terminations,
+                truncations,
+                info_list,
+                num_steps=chunk_size,
+                auto_reset=False,
+            )
+        )
+
+        obs_list = [extracted_obs]
+        infos_list = [infos]
+        chunk_rewards = self._cal_chunk_rewards(
+            step_reward, chunk_size, terminations, infos
+        )
+
+        past_dones = torch.logical_or(terminations, truncations)
+        if past_dones.any() and self.auto_reset:
+            obs_list[-1], infos_list[-1] = self._handle_auto_reset(
+                past_dones, obs_list[-1], infos_list[-1]
+            )
+
+        chunk_terminations = torch.zeros(
+            (num_envs, chunk_size), dtype=torch.bool, device=self.device
+        )
+        chunk_terminations[:, -1] = terminations
+
+        chunk_truncations = torch.zeros(
+            (num_envs, chunk_size), dtype=torch.bool, device=self.device
+        )
+        chunk_truncations[:, -1] = truncations
+
+        return (
+            obs_list,
+            chunk_rewards,
+            chunk_terminations,
+            chunk_truncations,
+            infos_list,
+        )
+
+    def _single_action_chunk_step(self, chunk_actions):
+        """Execute each action with RoboTwin's single-target controller.
+
+        This mode returns the observation after every completed target for
+        frame-level Online LeRobot DAgger collection.
         """
         # chunk_actions: [num_envs, chunk_step, action_dim]
         chunk_size = chunk_actions.shape[1]
@@ -315,8 +451,8 @@ class RoboTwinEnv(gym.Env):
         raw_chunk_truncations = []
         for step_idx in range(chunk_size):
             actions = chunk_actions[:, step_idx]
-            extracted_obs, step_reward, terminations, truncations, infos = self.step(
-                actions, auto_reset=False
+            extracted_obs, step_reward, terminations, truncations, infos = (
+                self.single_step(actions, auto_reset=False)
             )
             obs_list.append(extracted_obs)
             infos_list.append(infos)
