@@ -71,6 +71,7 @@ env:
   # Override the default values in env/robotwin_adjust_bottle
   train:
     rollout_epoch: 4
+    action_execution_mode: take_action
     total_num_envs: 256
     reward_coef: ${algorithm.reward_coef}
     max_episode_steps: 200
@@ -95,6 +96,7 @@ env:
     rollout_epoch: 1
     total_num_envs: 128
     auto_reset: True
+    action_execution_mode: take_action
     ignore_terminations: True
     max_episode_steps: 200
     reward_coef: ${algorithm.reward_coef}
