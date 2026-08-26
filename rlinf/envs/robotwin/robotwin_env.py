@@ -335,6 +335,7 @@ class RoboTwinEnv(gym.Env):
         info_list,
         num_steps,
         auto_reset,
+        apply_ignore_terminations=True,
     ):
         extracted_obs = self._extract_obs_image(raw_obs)
         infos = list_of_dict_to_dict_of_list(info_list)
@@ -364,7 +365,7 @@ class RoboTwinEnv(gym.Env):
 
         infos = self._record_metrics(step_reward, infos)
 
-        if self.ignore_terminations:
+        if self.ignore_terminations and apply_ignore_terminations:
             terminations[:] = False
             if self.record_metrics:
                 if "success" in infos:
@@ -402,6 +403,7 @@ class RoboTwinEnv(gym.Env):
                 info_list,
                 num_steps=chunk_size,
                 auto_reset=False,
+                apply_ignore_terminations=False,
             )
         )
 
@@ -410,6 +412,11 @@ class RoboTwinEnv(gym.Env):
         chunk_rewards = self._cal_chunk_rewards(
             step_reward, chunk_size, terminations, infos
         )
+
+        if self.ignore_terminations:
+            terminations[:] = False
+            if self.record_metrics and "success" in infos:
+                infos["episode"]["success_at_end"] = infos["success"].clone()
 
         past_dones = torch.logical_or(terminations, truncations)
         if past_dones.any() and self.auto_reset:
