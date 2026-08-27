@@ -1,0 +1,89 @@
+defaults:
+  - model/pi0_5_rlinf@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+# Dual-YAM joint-space Pi0.5 SFT on one 8-GPU node. The canonical
+# pi05_yam_joint OpenPI config supplies the YAM camera mapping, 14-D
+# state/action transforms, joint-delta actions, and quantile normalization.
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "dual_yam_joint_pi05_sft"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 100
+  max_steps: 30000
+  val_check_interval: -1
+  save_interval: 2000
+
+data:
+  train_data_paths: /mnt/public/datasets/yam_tele_data/0827_screwdriver_filtered
+  num_workers: 8
+
+algorithm:
+  adv_type: gae
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  # 8 GPUs: 256 / (4 * 8) = 8 gradient-accumulation steps.
+  micro_batch_size: 32
+  global_batch_size: 64
+  seed: 42
+
+  model:
+    model_path: /mnt/public/xietingying/ckpt/rlt-pi05/pi05_base_pytorch
+    num_action_chunks: 30
+    action_dim: 14
+    use_proprio: true
+    openpi:
+      task: sft
+      config_name: "pi05_yam_joint"
+      num_images_in_input: 3
+      action_chunk: 30
+      action_env_dim: 14
+      model_action_dim: 32
+      discrete_state_input: true
+      assets_dir: /mnt/public/xietingying/yam/RLinf/assets/pi05_yam_joint
+      asset_id: "0827_screwdriver_filtered"
+
+  optim:
+    lr: 7.5e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    clip_grad: 1.0
+    total_training_steps: 30000
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "full_shard"
+    use_orig_params: true
+    gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      buffer_dtype: fp32
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false

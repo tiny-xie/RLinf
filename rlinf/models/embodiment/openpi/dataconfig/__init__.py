@@ -561,7 +561,7 @@ _CONFIGS = [
         name="pi05_yam_joint",
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_horizon=50,
+            action_horizon=30,
             discrete_state_input=True,
         ),
         data=LeRobotYamDataConfig(
