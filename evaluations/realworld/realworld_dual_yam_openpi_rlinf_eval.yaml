@@ -160,12 +160,12 @@ rollout:
     precision: "bf16"
     num_action_chunks: 30
     action_dim: 14
+    openpi_data:
+      norm_stats_path: ${oc.env:REPO_PATH}/assets/pi05_yam_joint/0827_screwdriver_filtered/norm_stats.json
     openpi:
       task: "eval"
       config_name: "pi05_yam_joint"
       discrete_state_input: true
-      assets_dir: /mnt/public/xietingying/yam/RLinf/assets/pi05_yam_joint
-      asset_id: "0827_screwdriver_filtered"
 
 reward:
   use_reward_model: false
