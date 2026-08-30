@@ -17,7 +17,11 @@ import queue
 import torch
 import torch.nn.functional as F
 
-from rlinf.algorithms.rlt.transition import use_simulator_transition_replay
+from rlinf.algorithms.rlt.transition import (
+    filter_intervention_replay_trajectories,
+    use_intervention_only_replay,
+    use_simulator_transition_replay,
+)
 from rlinf.data.embodied_io_struct import Trajectory
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.scheduler import Worker
@@ -402,6 +406,27 @@ class RLTACReplayMixin:
             return None
         return bool(dones.detach().to(torch.bool).reshape(-1).any().item())
 
+    def _filter_intervention_only_replay(
+        self,
+        trajectories: list[Trajectory],
+    ) -> tuple[list[Trajectory], dict[str, float]]:
+        before_count = sum(
+            self._trajectory_transition_count(traj) for traj in trajectories
+        )
+        enabled = use_intervention_only_replay(self.cfg)
+        filtered = (
+            filter_intervention_replay_trajectories(trajectories)
+            if enabled
+            else trajectories
+        )
+        after_count = sum(self._trajectory_transition_count(traj) for traj in filtered)
+        return filtered, {
+            "replay/intervention_only_enabled": float(enabled),
+            "replay/pre_filter_transition_count": float(before_count),
+            "replay/intervention_transition_count": float(after_count),
+            "replay/dropped_non_intervention_count": float(before_count - after_count),
+        }
+
     @staticmethod
     def _row_tensor(tensor: torch.Tensor, idx: int) -> torch.Tensor:
         return tensor[idx].detach().clone().unsqueeze(0).unsqueeze(0).cpu().contiguous()
@@ -609,17 +634,20 @@ class RLTACReplayMixin:
 
         if use_simulator_transition_replay(self.cfg):
             replay_list = []
-            completed = 0
             for traj in recv_list:
                 assert isinstance(traj, Trajectory)
-                transition_trajs, completed_count = (
-                    self._transition_replay_trajectories(traj)
-                )
+                transition_trajs, _ = self._transition_replay_trajectories(traj)
                 replay_list.extend(transition_trajs)
-                completed += completed_count
+            replay_list, intervention_metrics = self._filter_intervention_only_replay(
+                replay_list
+            )
+            completed = sum(
+                self._trajectory_completed_episodes(traj) for traj in replay_list
+            )
             self._last_replay_metrics = {
                 **self._transition_replay_metrics(replay_list),
                 **collect_trajectory_replay_metrics(recv_list, reducer=all_reduce_dict),
+                **intervention_metrics,
             }
             self.replay_buffer.add_trajectories(replay_list)
 
@@ -634,11 +662,14 @@ class RLTACReplayMixin:
 
             return len(replay_list), completed
 
-        self.replay_buffer.add_trajectories(recv_list)
+        replay_list, intervention_metrics = self._filter_intervention_only_replay(
+            recv_list
+        )
+        self.replay_buffer.add_trajectories(replay_list)
 
         if self.demo_buffer is not None:
             intervene_traj_list = []
-            for traj in recv_list:
+            for traj in replay_list:
                 assert isinstance(traj, Trajectory)
                 intervene_trajs = traj.extract_intervene_traj()
                 if intervene_trajs is not None:
@@ -647,11 +678,14 @@ class RLTACReplayMixin:
             if len(intervene_traj_list) > 0:
                 self.demo_buffer.add_trajectories(intervene_traj_list)
 
-        added = sum(self._trajectory_transition_count(traj) for traj in recv_list)
-        completed = sum(self._trajectory_completed_episodes(traj) for traj in recv_list)
-        self._last_replay_metrics = collect_trajectory_replay_metrics(
-            recv_list, reducer=all_reduce_dict
+        added = sum(self._trajectory_transition_count(traj) for traj in replay_list)
+        completed = sum(
+            self._trajectory_completed_episodes(traj) for traj in replay_list
         )
+        self._last_replay_metrics = {
+            **collect_trajectory_replay_metrics(recv_list, reducer=all_reduce_dict),
+            **intervention_metrics,
+        }
         return added, completed
 
     def _update_rollout_ingest_counters(self, added: int, completed: int) -> None:

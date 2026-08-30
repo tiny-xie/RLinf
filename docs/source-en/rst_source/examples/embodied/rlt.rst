@@ -208,9 +208,10 @@ During rollout:
    next_obs = {next_z_rl, next_proprio, next_ref_chunk}
 
 For the provided real-robot config, ``keyboard_reward_wrapper:
-rlt_policy_switch`` adds an ``rlt_switch_flags`` flag. Before the operator presses
-``b``, the executed action is the VLA ``ref_chunk``; after ``b`` is pressed,
-the executed action switches to the Stage 2 actor.
+rlt_policy_switch`` adds an ``rlt_switch_flags`` flag. Press ``a`` to start a
+rollout under the VLA ``ref_chunk``. Press ``a`` again while running to mark
+failure. Each ``b`` press toggles the executed action between the Stage 2 MLP
+actor and the VLA. Press ``c`` to mark success; timeout is the fallback failure.
 
 For the ManiSkill joint config, ``env.*.rlt_policy_switch`` automatically
 produces ``rlt_switch_flags`` (actor/ref phase) and ``intervene_flag`` (expert
@@ -287,6 +288,7 @@ Important Stage 2 fields:
    algorithm:
      replay_buffer:
        rlt_window_stride: 2
+       rlt_intervention_only: true
        rlt_feature_batch_size: 4
 
    env:
@@ -318,6 +320,12 @@ deduplicates window anchors and asks the frozen Stage 1 model to backfill their
 RLT features in batches. This work is not part of the online action-inference
 path. Human actions replace the matching leading reference frames.
 ``rlt_window_stride`` must be a positive integer.
+When ``rlt_intervention_only`` is enabled, actor and critic training retain only
+sliding windows that contain at least one frame of human takeover. The retained
+sample is still the complete fixed-length window, and windows are still created
+at ``rlt_window_stride`` intervals; pure VLA and pure MLP windows are excluded.
+The replay builder deduplicates and recomputes Stage 1 ``z_rl`` features only
+for anchors referenced by the retained intervention windows.
 ``rlt_feature_batch_size`` bounds the post-rollout Stage 1 micro-batch.
 The VLA reference horizon is not a replay boundary: for a continuous rollout,
 stride-2 starts continue as ``0, 2, 4, ...`` across VLA replanning boundaries.
@@ -445,9 +453,10 @@ Launch the async run from the master node:
 
    bash examples/embodiment/run_realworld_async.sh realworld_rlt_stage2_ac_mlp
 
-The default keyboard module implements the key phase switch used by RLT: press
-``b`` to enter the Stage 2 actor-controlled phase. Other behavior can be
-customized for the task in
+The default keyboard module starts a rollout under VLA control when ``a`` is
+pressed. Pressing ``a`` again while running marks failure. Each ``b`` press
+toggles control between the VLA and Stage 2 MLP actor. Press ``c`` to mark
+success; a timeout is the fallback failure. Other behavior can be customized in
 ``rlinf/envs/realworld/common/wrappers/keyboard_rlt_policy_switch_wrapper.py``.
 
 Run the ManiSkill Joint Example

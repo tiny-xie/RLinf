@@ -193,8 +193,9 @@ rollout 时：
    next_obs = {next_z_rl, next_proprio, next_ref_chunk}
 
 Franka 真机配置中，``keyboard_reward_wrapper: rlt_policy_switch`` 会提供
-``rlt_switch_flags`` 标记。在操作员按下 ``b`` 之前，实际执行 VLA 的
-``ref_chunk``；按下 ``b`` 之后，实际执行 Stage 2 actor 的动作。
+``rlt_switch_flags`` 标记。按 ``a`` 后以 VLA 的 ``ref_chunk`` 开始 rollout；
+rollout 运行中再次按 ``a`` 标记失败。之后每按一次 ``b``，实际执行的动作就在
+Stage 2 MLP actor 与 VLA 之间切换。按 ``c`` 标记成功，超时作为兜底失败条件。
 
 ManiSkill joint 配置中，``env.*.rlt_policy_switch`` 使用任务信息自动产生
 ``rlt_switch_flags``（actor/ref 阶段）和 ``intervene_flag``（expert 接管请求）。
@@ -267,6 +268,7 @@ Stage 2 中比较关键的字段：
    algorithm:
      replay_buffer:
        rlt_window_stride: 2
+       rlt_intervention_only: true
        rlt_feature_batch_size: 4
 
    env:
@@ -292,6 +294,11 @@ human intervention action，那么这一步的 BC target 会切换成人类动�
 replay builder 会去重窗口端点，再使用冻结的 Stage 1 模型批量回填 RLT 特征；
 该过程不位于在线动作推理路径中。
 人类动作会改写相同位置的 reference 前缀。``rlt_window_stride`` 必须是正整数；
+开启 ``rlt_intervention_only`` 后，actor 和 critic 只使用至少包含一个人类接管帧的
+滑窗训练。保留下来的样本仍是完整的定长窗口，也仍按 ``rlt_window_stride``
+间隔构造；纯 VLA 和纯 MLP 窗口会被丢弃。
+replay builder 只对这些接管窗口引用的端点进行去重，并重新计算 Stage 1
+``z_rl`` 特征。
 ``rlt_feature_batch_size`` 用于限制 rollout 结束后 Stage 1 特征回填的
 micro-batch 大小。
 VLA reference horizon 不是 replay 的分段边界：连续 rollout 会跨过 VLA 的
@@ -416,8 +423,9 @@ Stage 2：运行 RLT Actor-Critic
 
    bash examples/embodiment/run_realworld_async.sh realworld_rlt_stage2_ac_mlp
 
-当前默认键盘模块实现了 RLT 算法中的关键阶段切换：按 ``b`` 进入 Stage 2 actor
-控制阶段。其他功能可根据具体任务需求进行定制
+当前默认键盘模块在按 ``a`` 后以 VLA 控制开始 rollout；运行中再次按 ``a`` 标记
+失败。之后每按一次 ``b``，控制权就在 VLA 与 Stage 2 MLP actor 之间切换。按 ``c``
+标记成功，超时作为兜底失败条件。其他功能可根据具体任务需求进行定制
 （``rlinf/envs/realworld/common/wrappers/keyboard_rlt_policy_switch_wrapper.py``）。
 
 运行 ManiSkill Joint 示例

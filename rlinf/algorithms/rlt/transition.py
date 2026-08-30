@@ -37,6 +37,28 @@ def get_rlt_replay_stride(cfg: Any) -> int | None:
     return stride
 
 
+def use_intervention_only_replay(cfg: Any) -> bool:
+    """Return whether RLT replay should retain only intervention windows."""
+    replay_cfg = cfg.algorithm.get("replay_buffer", {}) or {}
+    return bool(replay_cfg.get("rlt_intervention_only", False))
+
+
+def filter_intervention_replay_trajectories(
+    trajectories: list[Any],
+) -> list[Any]:
+    """Keep fixed-horizon replay rows containing a human intervention frame.
+
+    Each selected row remains an intact sliding window; the filter does not
+    crop the row down to individual intervention frames.
+    """
+    filtered = []
+    for trajectory in trajectories:
+        intervention_trajectories = trajectory.extract_intervene_traj(mode="any")
+        if intervention_trajectories is not None:
+            filtered.extend(intervention_trajectories)
+    return filtered
+
+
 def use_simulator_transition_replay(cfg: Any) -> bool:
     """Return True for envs that store one replay row per env step."""
     train_env_cfg = cfg.env.get("train", None)

@@ -26,6 +26,7 @@ from rlinf.algorithms.rlt.replay import RLTEnvReplaySession
 from rlinf.algorithms.rlt.transition import (
     get_rlt_replay_stride,
     update_rlt_transitions,
+    use_intervention_only_replay,
 )
 from rlinf.data.embodied_io_struct import (
     ChunkStepResult,
@@ -83,6 +84,7 @@ class EnvWorker(Worker):
             OmegaConf.select(self.cfg, "algorithm.loss_type", default="") == "rlt_ac"
         )
         self.rlt_window_stride = get_rlt_replay_stride(self.cfg)
+        self.rlt_intervention_only = use_intervention_only_replay(self.cfg)
 
         self.reward_mode = self.cfg.get("reward", {}).get("reward_mode", "per_step")
         self.history_reward_assign = self.cfg.get("reward", {}).get(
@@ -1037,6 +1039,7 @@ class EnvWorker(Worker):
                 stride=self.rlt_window_stride,
                 max_episode_length=int(self.cfg.env.train.max_episode_steps),
                 use_training_pipeline=self.use_training_pipeline,
+                intervention_only=self.rlt_intervention_only,
             )
             if self.rlt_window_stride is not None
             else None

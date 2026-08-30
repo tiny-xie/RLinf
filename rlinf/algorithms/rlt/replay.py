@@ -151,11 +151,13 @@ class RLTRawReplayBuilder:
         action_dim: int,
         stride: int,
         max_episode_length: int,
+        intervention_only: bool = False,
     ) -> None:
         self.chunk_len = chunk_len
         self.action_dim = action_dim
         self.stride = stride
         self.max_episode_length = max_episode_length
+        self.intervention_only = intervention_only
 
         self._state_obs: dict[int, dict[str, Any]] = {}
         self._transition_obs: dict[int, dict[str, Any]] = {}
@@ -356,6 +358,11 @@ class RLTRawReplayBuilder:
 
             terminal = bool(self._dones[start + self.chunk_len - 1][0])
             end = start + self.chunk_len
+            intervene_flags = self._window_tensor(self._intervene_flags, start)
+            if self.intervention_only and not bool(intervene_flags.any()):
+                start = end if terminal else start + self.stride
+                continue
+
             curr_anchor = add_anchor("state", start)
             next_anchor = add_anchor("transition" if terminal else "state", end)
             windows.append(
@@ -369,7 +376,7 @@ class RLTRawReplayBuilder:
                     dones=self._window_tensor(self._dones, start),
                     human_actions=self._window_tensor(self._human_actions, start),
                     human_flags=self._window_tensor(self._human_flags, start),
-                    intervene_flags=self._window_tensor(self._intervene_flags, start),
+                    intervene_flags=intervene_flags,
                     versions=self._versions[start],
                     record_transition=self._record_transition[start],
                 )
@@ -411,6 +418,7 @@ class RLTEnvReplaySession:
         stride: int,
         max_episode_length: int,
         use_training_pipeline: bool,
+        intervention_only: bool = False,
     ) -> None:
         self.stage_num = stage_num
         self.chunk_len = chunk_len
@@ -418,6 +426,7 @@ class RLTEnvReplaySession:
         self.stride = stride
         self.max_episode_length = max_episode_length
         self.use_training_pipeline = use_training_pipeline
+        self.intervention_only = intervention_only
         self.builders: list[RLTRawReplayBuilder] = []
         self.pending_chunks: list[dict[str, Any] | None] = []
         self.accumulated_results = (
@@ -464,6 +473,7 @@ class RLTEnvReplaySession:
                 action_dim=self.action_dim,
                 stride=self.stride,
                 max_episode_length=self.max_episode_length,
+                intervention_only=self.intervention_only,
             )
             for _ in range(self.stage_num)
         ]
