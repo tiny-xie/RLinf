@@ -451,11 +451,19 @@ class RollingLeRobotDataset(Dataset):
     def _load_archived_shard_store(
         self, path: str | Path
     ) -> tuple[Path, InMemoryArrowStore]:
-        """Decode a shard and build its in-memory store without indexing it."""
-        path, shard_episodes = self._load_archived_shard_episodes(path)
+        """Build a store from parquet tables without eagerly decoding images."""
+        import pyarrow.parquet as pq
+
+        path = Path(path)
+        with (path / "meta" / "info.json").open() as f:
+            info = json.load(f)
+        episodes = _read_jsonl(path / "meta" / "episodes.jsonl")
+        tasks = _read_lerobot_tasks(path / "meta" / "tasks.jsonl")
         store = self._new_in_memory_store()
-        for ep_frames in shard_episodes:
-            store.add_episode(ep_frames)
+        for episode in episodes:
+            parquet_path = _episode_parquet_path(path, info, episode)
+            table = pq.read_table(parquet_path, memory_map=True)
+            store.add_lerobot_episode_table(table, tasks)
         return path, store
 
     def _append_valid_indices_for_store(

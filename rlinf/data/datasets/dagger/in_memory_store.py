@@ -68,6 +68,9 @@ class InMemoryArrowStore:
             {k: list(range(chunk_size)) for k in keys} if chunk_size > 1 else {}
         )
         self._episode_datasets: deque[Any] = deque()
+        # Task ids are local to each archived LeRobot dataset. Keep the
+        # mapping alongside each episode instead of treating ids as global.
+        self._episode_tasks: deque[dict[int, str]] = deque()
         self._ep_from: deque[int] = deque()
         self._ep_to: deque[int] = deque()
         self._total_frames: int = 0
@@ -224,6 +227,7 @@ class InMemoryArrowStore:
         self._task_to_idx = prepared_episode["task_to_idx"]
         self._tasks = prepared_episode["tasks"]
         self._episode_datasets.append(prepared_episode["dataset"])
+        self._episode_tasks.append(dict(prepared_episode["tasks"]))
         self._ep_from.append(base)
         self._ep_to.append(base + n)
         self._total_frames += n
@@ -234,6 +238,47 @@ class InMemoryArrowStore:
         if not prepared_episode:
             return
         self._commit_prepared_episode(prepared_episode)
+
+    def add_lerobot_episode_table(
+        self, table: Any, task_by_index: dict[int, str]
+    ) -> None:
+        """Attach one archived parquet Arrow table without decoding images.
+
+        HuggingFace reads the embedded schema metadata from the table, so
+        LeRobot image structs remain lazy ``Image`` features. Images are then
+        decoded only for rows selected during training, avoiding an eager
+        decode of every PNG during preload.
+
+        Args:
+            table: A ``pyarrow.Table`` containing exactly one episode.
+            task_by_index: Dataset-local task id to prompt mapping.
+        """
+        from datasets import Dataset, Image
+
+        n = int(table.num_rows)
+        if n <= 0:
+            return
+
+        ep_ds = Dataset(table).with_format("torch")
+        hf_features = ep_ds.features
+        image_keys = {
+            key for key, feature in hf_features.items() if isinstance(feature, Image)
+        }
+        if self._hf_features is None:
+            self._hf_features = hf_features
+            self._image_keys = image_keys
+        elif set(hf_features) != set(self._hf_features):
+            raise ValueError(
+                "Archived LeRobot episode schema differs within one shard: "
+                f"expected {sorted(self._hf_features)}, got {sorted(hf_features)}"
+            )
+
+        base = self._total_frames
+        self._episode_datasets.append(ep_ds)
+        self._episode_tasks.append(dict(task_by_index))
+        self._ep_from.append(base)
+        self._ep_to.append(base + n)
+        self._total_frames += n
 
     # ------------------------------------------------------------------
     # Access
@@ -269,7 +314,10 @@ class InMemoryArrowStore:
 
         ep_ds = self._episode_datasets[ep_idx]
         item: dict[str, Any] = ep_ds[local_frame]
-        item["task"] = self._tasks.get(int(item["task_index"].item()), "")
+        task_index = int(item["task_index"].item())
+        item["task"] = self._episode_tasks[ep_idx].get(
+            task_index, self._tasks.get(task_index, "")
+        )
 
         if self._image_transforms is not None:
             for k in self._image_keys:
@@ -291,11 +339,14 @@ class InMemoryArrowStore:
                 for key, deltas in self._delta_indices.items()
             }
             # All chunk indices are within the same episode — use local offsets.
-            query_result = {
-                key: torch.stack(ep_ds.select([q - ep_start for q in q_idxs])[key])
-                for key, q_idxs in query_indices.items()
-                if key in self._hf_features and key not in self._image_keys
-            }
+            query_result = {}
+            for key, q_idxs in query_indices.items():
+                if key not in self._hf_features or key in self._image_keys:
+                    continue
+                values = ep_ds.select([q - ep_start for q in q_idxs])[key]
+                query_result[key] = (
+                    values if isinstance(values, torch.Tensor) else torch.stack(values)
+                )
             item = {**item, **padding}
             for k, v in query_result.items():
                 item[k] = v
