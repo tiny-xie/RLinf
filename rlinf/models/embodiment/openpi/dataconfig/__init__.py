@@ -555,6 +555,19 @@ _CONFIGS = [
         pytorch_weight_path="checkpoints/torch/pi05_base",
     ),
     TrainConfig(
+        name="pi05_dualfranka_tcp_rot6d_state",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=20, discrete_state_input=True
+        ),
+        data=DualFrankaTcpRot6dDataConfig(
+            repo_id="",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_base/assets"),
+            extra_delta_transform=True,
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
+    TrainConfig(
         name="pi0_droid_polaris",
         model=pi0_config.Pi0Config(
             action_horizon=10,

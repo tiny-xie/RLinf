@@ -50,11 +50,14 @@ from rlinf.utils.logging import get_logger
 logger = get_logger()
 
 __all__ = [
+    "DualFrankaSftRepack",
     "DualFrankaSftDataConfig",
     "DualFrankaSftDataLoader",
     "build_dual_franka_sft_dataloader",
+    "build_dual_franka_sft_transform",
     "collate_dual_franka_sft_items",
     "create_dual_franka_sft_data_loader",
+    "prepare_dual_franka_online_sft_batch",
 ]
 
 _IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
@@ -68,7 +71,7 @@ _REPACK_KEYS = {
 }
 
 
-class _Repack(DataTransformFn):
+class DualFrankaSftRepack(DataTransformFn):
     """Map raw dual-Franka LeRobot keys to canonical OpenPI input keys."""
 
     def __call__(self, frame: dict[str, typing.Any]) -> dict[str, typing.Any]:
@@ -94,6 +97,62 @@ class _Repack(DataTransformFn):
             prompt = prompt.item() if hasattr(prompt, "item") else str(prompt)
         data["prompt"] = prompt
         return data
+
+
+def build_dual_franka_sft_transform(
+    input_transforms: typing.Sequence[typing.Callable],
+) -> typing.Callable[[dict[str, typing.Any]], dict[str, typing.Any]]:
+    """Build the canonical raw-LeRobot-to-OpenPI SFT transform."""
+    return compose([DualFrankaSftRepack(), *input_transforms])
+
+
+def _take_online_batch_item(value: typing.Any, index: int) -> typing.Any:
+    """Select one item from a collated online batch and make it NumPy-safe."""
+    if isinstance(value, torch.Tensor):
+        return value[index].detach().cpu().numpy()
+    if isinstance(value, np.ndarray):
+        return value[index]
+    if isinstance(value, (list, tuple)):
+        return value[index]
+    return value
+
+
+def prepare_dual_franka_online_sft_batch(
+    batch: typing.Mapping[str, typing.Any],
+    transform: typing.Callable[[dict[str, typing.Any]], dict[str, typing.Any]],
+) -> tuple[Observation, torch.Tensor]:
+    """Transform a collated online-LeRobot batch into OpenPI SFT inputs.
+
+    Online DAgger moves the collated raw batch to the actor device before the
+    model adapter runs.  The OpenPI data transforms are NumPy transforms, so
+    this function selects each sample and explicitly stages only that sample
+    back to CPU before applying the same transform/collate path as offline SFT.
+    """
+    actions = batch.get("actions")
+    if actions is None:
+        raise KeyError("online dual_franka SFT batch is missing 'actions'.")
+    if not hasattr(actions, "shape") or len(actions.shape) < 1:
+        raise ValueError("online dual_franka SFT 'actions' must be batched.")
+
+    batch_size = int(actions.shape[0])
+    if batch_size <= 0:
+        raise ValueError("Cannot prepare an empty online dual_franka SFT batch.")
+
+    required_keys = tuple(_REPACK_KEYS.values())
+    transformed_items = []
+    for index in range(batch_size):
+        frame = {
+            key: _take_online_batch_item(batch[key], index)
+            for key in required_keys
+            if key in batch
+        }
+        if "prompt" in batch:
+            frame["prompt"] = _take_online_batch_item(batch["prompt"], index)
+        if "task" in batch:
+            frame["task"] = _take_online_batch_item(batch["task"], index)
+        transformed_items.append(transform(frame))
+
+    return collate_dual_franka_sft_items(transformed_items)
 
 
 class _TransformedDataset(torch.utils.data.Dataset):
@@ -210,7 +269,7 @@ def create_dual_franka_sft_data_loader(
     )
     source = _TransformedDataset(
         dataset,
-        compose([_Repack(), *input_transforms]),
+        build_dual_franka_sft_transform(input_transforms),
     )
 
     sampler = DistributedSampler(

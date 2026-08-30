@@ -54,6 +54,29 @@ class OpenPiPytorchSFTActionModel(OpenPiPytorchActionModel):
             action_env_dim=action_env_dim,
             rlt_cfg=rlt_cfg,
         )
+        self._dagger_input_transform = None
+
+    def setup_dagger_preprocessor(self, input_transforms: Any) -> None:
+        """Install the raw online-LeRobot preprocessing path for DAgger."""
+        from rlinf.data.datasets.openpi_rlinf.dual_franka.dual_franka_sft_data_loader import (
+            build_dual_franka_sft_transform,
+        )
+
+        self._dagger_input_transform = build_dual_franka_sft_transform(input_transforms)
+
+    def prepare_lerobot_sft_batch(self, batch: Any) -> tuple[Observation, torch.Tensor]:
+        """Convert a raw online dual-Franka LeRobot batch for SFT forward."""
+        if self._dagger_input_transform is None:
+            raise RuntimeError(
+                "openpi_rlinf online DAgger preprocessing is not configured. "
+                "Set actor.model.openpi.dagger_batch_preprocess=true."
+            )
+
+        from rlinf.data.datasets.openpi_rlinf.dual_franka.dual_franka_sft_data_loader import (
+            prepare_dual_franka_online_sft_batch,
+        )
+
+        return prepare_dual_franka_online_sft_batch(batch, self._dagger_input_transform)
 
     def forward(self, forward_type: ForwardType = ForwardType.SFT, **kwargs):
         """Dispatch — SFT variant only supports :attr:`ForwardType.SFT`."""

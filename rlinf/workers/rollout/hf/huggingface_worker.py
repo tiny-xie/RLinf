@@ -20,7 +20,7 @@ from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 import torch
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from rlinf.algorithms.expert import build_expert_model_config
@@ -36,6 +36,22 @@ from rlinf.models.embodiment.base_policy import BasePolicy
 from rlinf.scheduler import Channel, Cluster, Worker, split_channel_message
 from rlinf.utils.obs_compression import decompress_obs, infer_obs_batch_size
 from rlinf.utils.placement import HybridComponentPlacement
+
+
+def merge_rollout_model_config(
+    actor_model_cfg: DictConfig, rollout_model_cfg: DictConfig
+) -> DictConfig:
+    """Overlay rollout-only model settings on the actor model configuration.
+
+    DAgger trains and evaluates two wrappers around the same checkpoint.  In
+    particular, ``openpi_rlinf`` needs ``openpi.task=sft`` for the actor and
+    ``openpi.task=eval`` for rollout.  Merging the complete rollout block keeps
+    shared model-shape fields from the actor while allowing nested rollout
+    overrides such as the task selector.
+    """
+    return OmegaConf.merge(
+        copy.deepcopy(actor_model_cfg), copy.deepcopy(rollout_model_cfg)
+    )
 
 
 class MultiStepRolloutWorker(Worker):
@@ -139,10 +155,9 @@ class MultiStepRolloutWorker(Worker):
         self.rollout_queue_size = self.cfg.rollout.get("rollout_queue_size", 0)
 
     def init_worker(self):
-        rollout_model_config = copy.deepcopy(self.model_cfg)
-        with open_dict(rollout_model_config):
-            rollout_model_config.precision = self.cfg.rollout.model.precision
-            rollout_model_config.model_path = self.cfg.rollout.model.model_path
+        rollout_model_config = merge_rollout_model_config(
+            self.model_cfg, self.cfg.rollout.model
+        )
 
         self.hf_model: BasePolicy = get_model(rollout_model_config)
 

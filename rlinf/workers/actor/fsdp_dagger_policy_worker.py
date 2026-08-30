@@ -38,6 +38,70 @@ from rlinf.utils.utils import clear_memory
 from rlinf.workers.actor.embodied_fsdp_actor_worker import EmbodiedFSDPActor
 
 
+def _resolve_lerobot_preload_paths(
+    configured_paths, rank: int, shard_info_fn
+) -> list[Path]:
+    """Resolve LeRobot roots from direct, ranked, or parent directories."""
+    if configured_paths is None:
+        return []
+    if isinstance(configured_paths, (str, os.PathLike)):
+        configured_paths = [configured_paths]
+
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for configured_path in configured_paths:
+        path = Path(os.path.expandvars(str(configured_path))).expanduser()
+        if not path.is_dir():
+            raise FileNotFoundError(f"LeRobot preload path is not a directory: {path}")
+
+        if shard_info_fn(path) is not None:
+            candidates = [path]
+        else:
+            rank_path = path / f"rank_{rank}"
+            search_root = rank_path if rank_path.is_dir() else path
+            candidates = [
+                child
+                for child in sorted(search_root.iterdir())
+                if child.is_dir() and shard_info_fn(child) is not None
+            ]
+        if not candidates:
+            raise FileNotFoundError(
+                "LeRobot preload path contains no valid dataset roots: "
+                f"{path}. Expected meta/info.json plus episode parquet files "
+                "directly, under rank_<actor_rank>/, or in child directories."
+            )
+
+        for candidate in candidates:
+            canonical = candidate.resolve()
+            if canonical not in seen:
+                seen.add(canonical)
+                resolved.append(candidate)
+    return resolved
+
+
+def _build_dagger_sft_forward_kwargs(model_type: SupportedModel, data):
+    """Build SFT call arguments without leaking legacy model keywords."""
+    forward_kwargs = {
+        "forward_type": ForwardType.SFT,
+        "data": data,
+    }
+    if model_type == SupportedModel.OPENPI:
+        forward_kwargs["use_action_chunk_loss"] = True
+    return forward_kwargs
+
+
+def _extract_dagger_sft_loss(output):
+    """Normalize tensor and structured SFT outputs to one backward loss."""
+    if isinstance(output, dict):
+        if "loss" not in output:
+            raise ValueError(
+                "DAgger SFT model returned a dict without a 'loss' entry: "
+                f"{sorted(output)}"
+            )
+        return output["loss"]
+    return output
+
+
 class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
@@ -62,6 +126,8 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
         self._lerobot_resume_done = True
         self._lerobot_resume_thread: threading.Thread | None = None
         self._lerobot_resume_error: Exception | None = None
+        self._preloaded_lerobot_episodes = 0
+        self._preloaded_lerobot_frames = 0
 
     def _online_lerobot_cfg(self) -> DictConfig:
         return OmegaConf.select(
@@ -138,8 +204,40 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
 
         return self._select_lerobot_resume_shards(valid_shards)
 
+    def _discover_lerobot_preload_shards(self) -> list[dict]:
+        """Resolve configured offline LeRobot datasets for initial seeding."""
+        online_lerobot_cfg = self._online_lerobot_cfg()
+        preload_path = online_lerobot_cfg.get("preload_path", None)
+        preload_paths = online_lerobot_cfg.get("preload_paths", None)
+        if preload_path and preload_paths:
+            raise ValueError(
+                "Set only one of algorithm.dagger.online_lerobot.preload_path "
+                "and preload_paths."
+            )
+        configured_paths = preload_paths if preload_paths is not None else preload_path
+        paths = _resolve_lerobot_preload_paths(
+            configured_paths, self._rank, self.dataset.archived_shard_info
+        )
+
+        preload_shards = []
+        for preload_id, path in enumerate(paths):
+            shard_info = self.dataset.archived_shard_info(path)
+            assert shard_info is not None
+            preload_shards.append(
+                {
+                    "id": f"preload_{preload_id}",
+                    "path": path,
+                    "num_episodes": int(shard_info["num_episodes"]),
+                    "num_frames": int(shard_info["num_frames"]),
+                    "is_preload": True,
+                }
+            )
+        return preload_shards
+
     def _resume_lerobot_dataset(self) -> None:
-        shards_to_load = self._discover_lerobot_resume_shards()
+        preload_shards = self._discover_lerobot_preload_shards()
+        resume_shards = self._discover_lerobot_resume_shards()
+        shards_to_load = [*preload_shards, *resume_shards]
         if not shards_to_load:
             self._lerobot_resume_done = True
             return
@@ -147,8 +245,10 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
         self._lerobot_resume_done = False
         self._lerobot_resume_error = None
         self._logger.info(
-            "Starting background LeRobot resume: shards=%d, ids=%s, workers=%d",
-            len(shards_to_load),
+            "Starting background LeRobot bootstrap: preload_shards=%d, "
+            "resume_shards=%d, ids=%s, workers=%d",
+            len(preload_shards),
+            len(resume_shards),
             [shard["id"] for shard in shards_to_load],
             self._lerobot_resume_num_workers,
         )
@@ -170,11 +270,21 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
             total_episodes, total_frames = self.dataset.publish_staged_resume_shards(
                 staged_stores
             )
+            self._preloaded_lerobot_episodes = sum(
+                shard["num_episodes"]
+                for shard in shards_to_load
+                if shard.get("is_preload", False)
+            )
+            self._preloaded_lerobot_frames = sum(
+                shard["num_frames"]
+                for shard in shards_to_load
+                if shard.get("is_preload", False)
+            )
             self._refresh_lerobot_loader_after_resume()
             self._lerobot_resume_done = True
         except Exception as exc:  # noqa: BLE001
             self._lerobot_resume_error = exc
-            self._logger.exception("Background LeRobot resume failed.")
+            self._logger.exception("Background LeRobot bootstrap failed.")
             return
 
         self._logger.info(
@@ -182,6 +292,8 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
             f"{self._rank}: shards={len(shards_to_load)}, "
             f"ids={[shard['id'] for shard in shards_to_load]}, "
             f"episodes={total_episodes}, frames={total_frames}, "
+            f"preloaded_episodes={self._preloaded_lerobot_episodes}, "
+            f"preloaded_frames={self._preloaded_lerobot_frames}, "
             f"resume_workers={self._lerobot_resume_num_workers}, "
             f"next_archive_id={self._next_lerobot_archive_id}"
         )
@@ -451,14 +563,11 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
     def forward_actor(self, batch):
         """Run one supervised forward pass for DAgger."""
         data = self._prepare_sft_batch(batch)
-        use_action_chunk_loss = (
-            SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.OPENPI
+        model_type = SupportedModel(self.cfg.actor.model.model_type)
+        output = self.model(
+            **_build_dagger_sft_forward_kwargs(model_type, data),
         )
-        return self.model(
-            forward_type=ForwardType.SFT,
-            data=data,
-            use_action_chunk_loss=use_action_chunk_loss,
-        )
+        return _extract_dagger_sft_loss(output)
 
     @Worker.timer("update_one_epoch")
     def update_one_epoch(self):
@@ -522,8 +631,13 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
                 train_micro_batch_list = [
                     next(self._lerobot_iter) for _ in range(num_batches)
                 ]
+            model_type = SupportedModel(self.cfg.actor.model.model_type)
             for idx, batch in enumerate(train_micro_batch_list):
-                batch = put_tensor_device(batch, device=self.device)
+                # openpi_rlinf applies the NumPy OpenPI transform pipeline on
+                # CPU, then moves the transformed Observation in sft_forward.
+                # Avoid a redundant CPU -> GPU -> CPU round trip here.
+                if model_type != SupportedModel.OPENPI_RLINF:
+                    batch = put_tensor_device(batch, device=self.device)
                 if self.enable_drq:
                     drq.apply_drq(batch["curr_obs"], pad=4)
                 train_micro_batch_list[idx] = batch
@@ -588,6 +702,12 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
                     ),
                     "lerobot_dataset/resume_error": int(
                         self._lerobot_resume_error is not None
+                    ),
+                    "lerobot_dataset/preloaded_episodes": (
+                        self._preloaded_lerobot_episodes
+                    ),
+                    "lerobot_dataset/preloaded_frames": (
+                        self._preloaded_lerobot_frames
                     ),
                 }
             )
