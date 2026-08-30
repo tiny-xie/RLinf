@@ -63,6 +63,8 @@ runner:
   max_epochs: 80000
   max_steps: -1
   only_eval: False
+  # Sync the trained VLA to rollout after every 30 successful actor updates.
+  weight_sync_interval: 30
   val_check_interval: -1
   save_interval: 3000
   resume_dir: null
