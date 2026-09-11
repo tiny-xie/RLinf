@@ -119,7 +119,7 @@ env:
     max_episode_steps: 1050
     max_steps_per_rollout_epoch: 1050
     pico:
-      zmq_addr: "tcp://192.168.120.228:5555"
+      zmq_addr: "tcp://192.168.121.5:5555"
       hand: "dual"
       hold_current_when_inactive: False
       control_trigger: "grip"
@@ -144,7 +144,7 @@ env:
         gripper_open_button: "B"
     override_cfg:
       is_dummy: False
-      task_description: "Pick up the purple peg with your left hand and place it on the white plate"
+      task_description: "Pick up the light strip with both hands and hang it on the corresponding hooks. Place your left hand on the control/inspection power strip, then use your right hand to pick up the charger and insert it into the corresponding socket."
       use_dense_reward: False
       max_num_steps: 1050
       rotation_repr: rot6d
@@ -213,7 +213,7 @@ actor:
     add_value_head: False
     action_dim: 20
     num_action_chunks: 10
-    num_steps: 3
+    num_steps: 5
     openpi_data:
       repo_id: "dual_peg_merged"
     openpi:
@@ -235,7 +235,7 @@ actor:
       rlt_use_mask: True
 
   optim:
-    lr: 5.0e-6
+    lr: 5.0e-5
     value_lr: 1.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.95
