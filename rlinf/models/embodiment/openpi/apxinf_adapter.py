@@ -204,6 +204,8 @@ class _RLInfOpenPITransforms:
             observation["observation/wrist_image"] = env_obs["wrist_images"]
         if env_obs.get("extra_view_images") is not None:
             observation["observation/extra_view_image"] = env_obs["extra_view_images"]
+        if env_obs.get("goal_images") is not None:
+            observation["observation/goal_image"] = env_obs["goal_images"]
         return observation
 
     def preprocess_batch(
@@ -350,6 +352,15 @@ class OpenPIApxInfAdapter:
             )
 
         openpi_cfg = self.model_cfg.get("openpi", {})
+        if (
+            openpi_cfg.get("goal_cross_attention_layers", [])
+            or not openpi_cfg.get("goal_in_prefix", True)
+            or openpi_cfg.get("goal_prefix_mode", "joint") != "joint"
+            or openpi_cfg.get("goal_injection_mode", "none") != "none"
+        ):
+            raise ValueError(
+                "ApxInf does not implement goal routing/cross-attention; use native PyTorch eval."
+            )
         config_name = str(openpi_cfg.get("config_name", "pi05_libero"))
         if not config_name.startswith("pi05_"):
             raise ValueError(

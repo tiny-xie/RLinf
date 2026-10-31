@@ -1240,17 +1240,47 @@ class EnvWorker(Worker):
 
         return env_metrics
 
+    def _reset_eval_batch(self, stage_id: int, epoch: int):
+        """Start a round or reuse the next ordered LIBERO batch."""
+        env = self.eval_env_list[stage_id]
+        cfg = self.cfg.env.eval
+        continue_batches = cfg.get("continue_eval_across_epochs", False)
+        if continue_batches and (
+            cfg.env_type != "libero"
+            or cfg.auto_reset
+            or not cfg.get("use_fixed_reset_state_ids", False)
+        ):
+            raise ValueError(
+                "continue_eval_across_epochs requires LIBERO, auto_reset=False "
+                "and use_fixed_reset_state_ids=True."
+            )
+
+        env.is_start = not (continue_batches and epoch > 0)
+        if env.is_start:
+            return env.reset()
+
+        # finish_rollout already advanced the ordered pool. Passing the IDs
+        # explicitly avoids reset's random-state fallback.
+        reset_ids = np.asarray(get_env_attr(env, "reset_state_ids"))
+        if reset_ids.shape != (self.eval_num_envs_per_stage,) or np.any(reset_ids < 0):
+            raise ValueError(
+                "Not enough unused LIBERO initial states for the next eval batch; "
+                "reduce rollout_epoch or total_num_envs."
+            )
+        return env.reset(reset_state_ids=reset_ids.copy())
+
     @Worker.timer("evaluate")
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         eval_metrics = defaultdict(list)
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
                 for stage_id in range(self.stage_num):
-                    self.eval_env_list[stage_id].is_start = True
                     self.eval_prev_done[stage_id] = torch.zeros(
                         self.eval_num_envs_per_stage, dtype=torch.bool
                     )
-                    extracted_obs, infos = self.eval_env_list[stage_id].reset()
+                    extracted_obs, infos = self._reset_eval_batch(
+                        stage_id, eval_rollout_epoch
+                    )
                     env_output = EnvOutput(
                         obs=extracted_obs,
                         final_obs=(

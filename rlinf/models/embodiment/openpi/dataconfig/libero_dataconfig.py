@@ -20,6 +20,9 @@ from openpi.training.config import DataConfig, DataConfigFactory, ModelTransform
 from typing_extensions import override
 
 from rlinf.models.embodiment.openpi.policies import libero_policy
+from rlinf.models.embodiment.openpi.policies.steering_commands import (
+    SampleSteeringCommand,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -31,6 +34,9 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     """
 
     extra_delta_transform: bool = False
+    use_goal_image: bool = False
+    goal_image_prompt: str | None = libero_policy.GOAL_IMAGE_PROMPT
+    use_steering_commands: bool = False
 
     @override
     def create(
@@ -44,19 +50,25 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # For your own dataset, first figure out what keys your environment passes to the policy server
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
+        repack_keys = {
+            "observation/image": "image",
+            "observation/wrist_image": "wrist_image",
+            "observation/state": "state",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if self.use_goal_image:
+            repack_keys["observation/goal_image"] = "goal_image"
+        if self.use_steering_commands:
+            if self.use_goal_image:
+                raise ValueError(
+                    "Steering commands and fixed goal-image prompts are mutually exclusive."
                 )
-            ]
-        )
+            repack_keys["steering_commands"] = "steering_commands"
+        repack_inputs = [_transforms.RepackTransform(repack_keys)]
+        if self.use_steering_commands:
+            repack_inputs.append(SampleSteeringCommand())
+        repack_transform = _transforms.Group(inputs=repack_inputs)
 
         # The data transforms are applied to the data coming from the dataset *and* during inference.
         # Below, we define the transforms for data going into the model (``inputs``) and the transforms
@@ -65,7 +77,13 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            inputs=[
+                libero_policy.LiberoInputs(
+                    model_type=model_config.model_type,
+                    use_goal_image=self.use_goal_image,
+                    goal_image_prompt=self.goal_image_prompt,
+                )
+            ],
             outputs=[libero_policy.LiberoOutputs()],
         )
 

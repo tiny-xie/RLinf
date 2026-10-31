@@ -386,8 +386,7 @@ class FSDPModelManager:
 
     def save_checkpoint(self, save_path: str, step: int = 0) -> None:
         """
-        Save checkpoint to local path.
-        Every rank will save its own model and optim shard.
+        Save checkpoint according to the configured weight and training-state flags.
 
         Args:
             save_path: the directory to save checkpoint.
@@ -408,6 +407,7 @@ class FSDPModelManager:
             save_full_model_weights=self._cfg.fsdp_config.get(
                 "save_full_model_weights", True
             ),
+            save_training_state=self._cfg.fsdp_config.get("save_training_state", True),
         )
 
         if restore_weight_offload:

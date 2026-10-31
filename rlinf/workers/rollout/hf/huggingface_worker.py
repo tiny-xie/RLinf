@@ -43,6 +43,7 @@ from rlinf.models.embodiment.base_policy import BasePolicy
 from rlinf.scheduler import Channel, Cluster, Worker, split_channel_message
 from rlinf.utils.obs_compression import decompress_obs, infer_obs_batch_size
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.workers.rollout.external_prompt import ExternalPromptController
 
 
 class MultiStepRolloutWorker(Worker):
@@ -138,6 +139,27 @@ class MultiStepRolloutWorker(Worker):
             self._sync_weight_comm_options = self.weight_syncer.comm_options
 
         self.env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+
+        self.external_prompt_controller = None
+        external_cfg = self.cfg.rollout.get("external_prompt", {})
+        if external_cfg.get("enabled", False):
+            if (
+                not self.only_eval
+                or self.env_decoupled_mode
+                or self.num_pipeline_stages != 1
+            ):
+                raise ValueError(
+                    "External prompts require synchronous eval-only mode with one pipeline stage."
+                )
+            if self.cfg.rollout.get("rlt_feature_model", None) is not None:
+                raise ValueError(
+                    "External prompts require the standard HF policy prediction route."
+                )
+            self.external_prompt_controller = ExternalPromptController(
+                directory=external_cfg.directory,
+                rank=self._rank,
+                timeout_s=external_cfg.get("timeout_s", 1800),
+            )
 
         if self.env_decoupled_mode:
             # save the run-time imformation in communicate channel for decoupled mode
@@ -485,6 +507,9 @@ class MultiStepRolloutWorker(Worker):
     def predict(
         self, env_obs: dict[str, Any], mode: Literal["train", "eval"] = "train"
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        controller = getattr(self, "external_prompt_controller", None)
+        if mode == "eval" and controller is not None:
+            env_obs = controller.apply(env_obs)
         kwargs = (
             self._train_sampling_params
             if mode == "train"

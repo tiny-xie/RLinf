@@ -46,6 +46,7 @@ _BARE_PI0_PREFIXES = (
     "action_time_mlp_in.",
     "action_time_mlp_out.",
     "pointnet.",
+    "gift.",
 )
 
 _OLD_OPENPI_PREFIX = "paligemma_with_expert."
@@ -102,8 +103,15 @@ def _normalize_state_dict(state_dict):
             rest = key[len(_OLD_WRAPPER_MODEL_PREFIX) :]
             # Only strip when the remainder is a Pi0 module (or nested FSDP
             # leftover). Algorithm heads never lived under ``model.``.
-            if rest.startswith(_BARE_PI0_PREFIXES) or rest.startswith(
-                _FSDP_WRAPPER_PREFIXES
+            if (
+                rest.startswith(_BARE_PI0_PREFIXES)
+                or rest.startswith(_FSDP_WRAPPER_PREFIXES)
+                or rest
+                in {
+                    "goal_role_embedding",
+                    "goal_conditioning_spec",
+                    "gift_conditioning_spec",
+                }
             ):
                 key = rest
         if key in normalized:
@@ -138,7 +146,41 @@ def _convert_official_openpi_keys(state_dict, source) -> dict:
     return converted
 
 
-def load_full_weights(model, weights_path, *, expect_rlt: bool) -> None:
+def _prepare_goal_role_weights(
+    model: Any, state_dict: dict[str, Any], *, allow_missing: bool
+) -> dict[str, Any]:
+    """Initialize a new training role or omit its weights when disabled."""
+    import torch
+
+    key = "goal_role_embedding"
+    role = getattr(model, key, None)
+    if role is None:
+        if key in state_dict:
+            state_dict = {
+                name: value for name, value in state_dict.items() if name != key
+            }
+            logger.info("openpi: goal role embedding disabled; omitting its weights")
+    elif key not in state_dict:
+        if not allow_missing:
+            raise RuntimeError(
+                "Goal role embedding is enabled, but the checkpoint has no "
+                "goal_role_embedding weights. Evaluate a role-trained checkpoint "
+                "or set openpi.use_goal_role_embedding=False for the original mode."
+            )
+        with torch.no_grad():
+            role.zero_()
+        logger.info("openpi: initialized missing goal role embedding to zero for SFT")
+    return state_dict
+
+
+def load_full_weights(
+    model,
+    weights_path,
+    *,
+    expect_rlt: bool,
+    allow_missing_goal_role: bool = True,
+    allow_initialize_gift: bool = False,
+) -> None:
     """Load an RLinf ``full_weights.pt`` checkpoint into a Pi0 (or subclass)."""
     import torch
 
@@ -148,6 +190,15 @@ def load_full_weights(model, weights_path, *, expect_rlt: bool) -> None:
     state_dict = _convert_official_openpi_keys(
         _normalize_state_dict(as_state_dict(loaded)),
         weights_path,
+    )
+    state_dict = _prepare_goal_attention_weights(
+        model,
+        state_dict,
+        allow_initialize=allow_initialize_gift
+        and getattr(model, "gift", None) is not None,
+    )
+    state_dict = _prepare_goal_role_weights(
+        model, state_dict, allow_missing=allow_missing_goal_role
     )
     if expect_rlt and not any(key.startswith("rlt_module.") for key in state_dict):
         raise ValueError(
@@ -189,13 +240,25 @@ def load_full_weights(model, weights_path, *, expect_rlt: bool) -> None:
         logger.info("openpi: loaded full checkpoint from %s", weights_path)
 
 
-def load_base_safetensors(model, safetensors_path) -> None:
+def load_base_safetensors(
+    model,
+    safetensors_path,
+    *,
+    allow_missing_goal_role: bool = True,
+    allow_missing_goal_attention: bool = False,
+) -> None:
     """Load a base checkpoint, accepting new and legacy OpenPI layouts."""
     import safetensors.torch
 
     state_dict = _convert_official_openpi_keys(
         safetensors.torch.load_file(str(safetensors_path), device="cpu"),
         safetensors_path,
+    )
+    state_dict = _prepare_goal_attention_weights(
+        model, state_dict, allow_initialize=allow_missing_goal_attention
+    )
+    state_dict = _prepare_goal_role_weights(
+        model, state_dict, allow_missing=allow_missing_goal_role
     )
     incompatible = model.load_state_dict(state_dict, strict=False)
     unexpected = list(incompatible.unexpected_keys)
@@ -211,8 +274,68 @@ def load_base_safetensors(model, safetensors_path) -> None:
     if incompatible.missing_keys:
         logger.info(
             "openpi: loaded base safetensors %s; leaving %d extra module "
-            "tensors randomly initialized (%s...)",
+            "tensors at their initial values (%s...)",
             safetensors_path,
             len(incompatible.missing_keys),
             incompatible.missing_keys[:4],
         )
+
+
+def _prepare_goal_attention_weights(
+    model: Any, state_dict: dict[str, Any], *, allow_initialize: bool
+) -> dict[str, Any]:
+    """Allow new branches from base weights only; reject partial or wrong routes."""
+    import torch
+
+    expected = {
+        name: value
+        for name, value in model.state_dict().items()
+        if ".goal_attention." in name
+        or name.startswith("gift.")
+        or name in {"goal_conditioning_spec", "gift_conditioning_spec"}
+    }
+    incoming = {
+        name: value
+        for name, value in state_dict.items()
+        if ".goal_attention." in name
+        or name.startswith("gift.")
+        or name in {"goal_conditioning_spec", "gift_conditioning_spec"}
+    }
+    if not incoming and not expected:
+        return state_dict
+    if not incoming and expected and allow_initialize:
+        if getattr(model, "gift", None) is not None:
+            # The constructor sees a fresh SigLIP head, often all zeros. Copy
+            # checkpoint weights here, not constructor weights, for adaptation.
+            for key in model.gift.goal_projector.state_dict():
+                source_key = "img.head." + key
+                if source_key not in state_dict:
+                    raise RuntimeError(f"Cannot initialize GIFT: missing {source_key}")
+                expected["gift.goal_projector." + key] = state_dict[source_key].clone()
+        logger.info(
+            "openpi: initializing %d missing goal-conditioning tensors from base",
+            len(expected),
+        )
+        return {**state_dict, **expected}
+    if expected.keys() != incoming.keys():
+        raise RuntimeError(
+            "Goal attention checkpoint/config mismatch: "
+            f"missing={sorted(expected.keys() - incoming.keys())}, "
+            f"unexpected={sorted(incoming.keys() - expected.keys())}. "
+            "Use matching goal YAML for evaluation/resume; initialize new branches from base safetensors for SFT."
+        )
+    if not torch.equal(
+        incoming["goal_conditioning_spec"].cpu(),
+        expected["goal_conditioning_spec"].cpu(),
+    ):
+        raise RuntimeError(
+            "Goal conditioning configuration differs from checkpoint; match goal_prefix_mode, goal_in_prefix, role, layers and head dimensions in YAML."
+        )
+    if "gift_conditioning_spec" in expected and not torch.equal(
+        incoming["gift_conditioning_spec"].cpu(),
+        expected["gift_conditioning_spec"].cpu(),
+    ):
+        raise RuntimeError(
+            "GIFT checkpoint/config mismatch: match gift_use_difference."
+        )
+    return state_dict

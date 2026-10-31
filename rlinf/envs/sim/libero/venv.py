@@ -171,8 +171,18 @@ def _worker(
             elif cmd == "reconfigure":
                 env.close()
                 seed = data.pop("seed")
+                atomic_sequence = data.pop("atomic_sequence", None)
                 env = OffScreenRenderEnv(**data)
+                if atomic_sequence is not None:
+                    from rlinf.envs.sim.libero.atomic_eval import AtomicSequenceEnv
+
+                    env = AtomicSequenceEnv(env, **atomic_sequence)
                 env.seed(seed)
+                p.send(None)
+            elif cmd == "begin_atomic_sequence":
+                p.send(env.begin_atomic_sequence())
+            elif cmd == "resume_atomic_sequence":
+                env.resume_atomic_sequence()
                 p.send(None)
             elif cmd == "get_camera_meta":
                 # Compute camera intrinsics/extrinsics and depth near/far
@@ -284,3 +294,20 @@ class ReconfigureSubprocEnv(SubprocVectorEnv):
             self.workers[i].parent_remote.send(["set_camera_rendering", enabled])
         for i in id:
             self.workers[i].parent_remote.recv()
+
+    def begin_atomic_sequence(self, id=None):
+        """Capture settled robot poses and return first-stage observations."""
+        return self._atomic_sequence_command("begin_atomic_sequence", id)
+
+    def resume_atomic_sequence(self, id=None):
+        """Start a fresh policy chunk after any per-environment stage change."""
+        self._atomic_sequence_command("resume_atomic_sequence", id)
+
+    def _atomic_sequence_command(self, command: str, id=None):
+        self._assert_is_not_closed()
+        id = self._wrap_id(id)
+        if self.is_async:
+            self._assert_id(id)
+        for i in id:
+            self.workers[i].parent_remote.send([command, None])
+        return [self.workers[i].parent_remote.recv() for i in id]

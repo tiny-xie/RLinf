@@ -32,4 +32,14 @@ def repack_env_obs(env_obs: dict, *, select_state: Callable) -> dict:
     extra_view_images = env_obs.get("extra_view_images")
     if extra_view_images is not None:
         processed_obs["observation/extra_view_image"] = extra_view_images
+    goal_images = env_obs.get("goal_images")
+    if goal_images is not None:
+        if (
+            len(goal_images.shape) != 4
+            or goal_images.shape[0] != env_obs["main_images"].shape[0]
+        ):
+            raise ValueError(
+                "goal_images must have shape [B, H, W, 3] or [B, 3, H, W], matching the observation batch."
+            )
+        processed_obs["observation/goal_image"] = goal_images
     return processed_obs

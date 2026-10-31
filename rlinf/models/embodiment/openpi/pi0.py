@@ -22,7 +22,7 @@ subclasses (eval / RL / DAgger / DSRL) inherit this module.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Sequence
 
 import einops
 import torch
@@ -31,6 +31,12 @@ import torch.nn.functional as F
 
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.openpi.modules import gemma, model, pointnet, siglip
+from rlinf.models.embodiment.openpi.modules.goal_cross_attention import (
+    GoalCrossAttention,
+)
+from rlinf.models.embodiment.openpi.modules.goal_feature_injection import (
+    GoalFeatureInjection,
+)
 from rlinf.models.embodiment.openpi.modules.utils import _str_to_dtype
 from rlinf.models.embodiment.openpi.pi0_config import Pi0Config
 from rlinf.models.embodiment.openpi.rlt_config import OpenPiPytorchRLTConfig
@@ -84,6 +90,24 @@ def posemb_sincos(
     )
 
 
+class ConditionContext(NamedTuple):
+    """One observation's shared prefix and pre-Gemma goal memory."""
+
+    prefix_tokens: torch.Tensor
+    prefix_valid: torch.Tensor
+    prefix_block_mask: torch.Tensor
+    goal_tokens: torch.Tensor | None
+    goal_valid: torch.Tensor | None
+
+
+class GoalPrefixCache(NamedTuple):
+    """Prefix KV and goal memory, owned by one action-generation call."""
+
+    prefix_kv: tuple
+    goal_tokens: torch.Tensor
+    goal_valid: torch.Tensor
+
+
 class Pi0(model.BaseModel):
     """Pi0 flow-matching model: network assembly plus RLinf SFT forward."""
 
@@ -125,6 +149,12 @@ class Pi0(model.BaseModel):
             use_gradient_checkpointing=False,
             dtype_mm=config.dtype,
         )
+        self.register_parameter(
+            "goal_role_embedding",
+            nn.Parameter(torch.zeros(1, 1, paligemma_config.width))
+            if config.use_goal_role_embedding
+            else None,
+        )
 
         action_expert_width = action_expert_config.width
         self.action_dim = config.action_dim
@@ -156,6 +186,18 @@ class Pi0(model.BaseModel):
             )
 
         self._init_weights()
+        self.gift = (
+            GoalFeatureInjection(
+                self.img.head, use_difference=config.gift_use_difference
+            )
+            if config.goal_injection_mode == "gift"
+            else None
+        )
+        if self.gift is not None:
+            self.register_buffer(
+                "gift_conditioning_spec",
+                torch.tensor([1, int(config.gift_use_difference)], dtype=torch.int64),
+            )
         self._init_rlinf_runtime(
             num_steps=num_steps,
             action_env_dim=action_env_dim,
@@ -164,9 +206,87 @@ class Pi0(model.BaseModel):
             state_indices=state_indices,
             rlt_cfg=rlt_cfg,
         )
+        for layer_index in config.goal_cross_attention_layers:
+            self.llm.layers[layer_index].goal_attention = GoalCrossAttention(
+                action_expert_config.width,
+                paligemma_config.width,
+                num_heads=config.goal_cross_attention_num_heads,
+                num_kv_heads=config.goal_cross_attention_num_kv_heads,
+                head_dim=config.goal_cross_attention_head_dim,
+                seed=(config.goal_cross_attention_seed + 1_000_003 * (layer_index + 1))
+                % (2**63 - 1),
+            )
+        # Persistent tensor metadata works with FSDP state_dict and safetensors.
+        # Old prefix-only checkpoints retain their original key layout.
+        if (
+            config.goal_cross_attention_layers
+            or not config.goal_in_prefix
+            or config.goal_prefix_mode != "joint"
+        ):
+            spec = [
+                int(config.goal_in_prefix),
+                int(config.use_goal_role_embedding),
+                config.goal_cross_attention_num_heads,
+                config.goal_cross_attention_num_kv_heads,
+                config.goal_cross_attention_head_dim,
+                *config.goal_cross_attention_layers,
+            ]
+            if config.goal_prefix_mode == "joint":
+                spec = [1, *spec]
+            else:
+                # Version 2 adds the prefix mode; existing v1 B checkpoints
+                # retain their exact metadata and loading behavior.
+                mode_id = 1 if config.goal_prefix_mode == "pi07_style" else 2
+                spec = [2, mode_id, *spec]
+            self.register_buffer(
+                "goal_conditioning_spec",
+                torch.tensor(spec, dtype=torch.int64),
+            )
         # PI0Pytorch.__init__ sets this globally so fp32 action/value heads
         # use TF32. OpenPI RL keeps this even though it un-compiles sample_actions.
         torch.set_float32_matmul_precision("high")
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key = prefix + "goal_conditioning_spec"
+        incoming = state_dict.get(key)
+        expected = getattr(self, "goal_conditioning_spec", None)
+        if self._config.goal_prefix_mode != "joint" and incoming is None:
+            error_msgs.append("Missing goal_conditioning_spec for pi07-style prefix")
+        if incoming is not None and (
+            expected is None or not torch.equal(incoming.cpu(), expected.cpu())
+        ):
+            error_msgs.append(
+                "Goal conditioning configuration differs from checkpoint; match goal_prefix_mode, goal_in_prefix, role, layers and head dimensions in YAML."
+            )
+        gift_key = prefix + "gift_conditioning_spec"
+        gift_spec = state_dict.get(gift_key)
+        expected_gift = getattr(self, "gift_conditioning_spec", None)
+        if (gift_spec is None) != (expected_gift is None) or (
+            gift_spec is not None
+            and expected_gift is not None
+            and not torch.equal(gift_spec.cpu(), expected_gift.cpu())
+        ):
+            error_msgs.append(
+                "GIFT checkpoint/config mismatch: match goal_injection_mode and gift_use_difference."
+            )
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _init_weights(self):
         """Initialize projection weights."""
@@ -196,28 +316,107 @@ class Pi0(model.BaseModel):
         Returns:
             tokens: (B, S, emb_dim) embedded tokens
             input_mask: (B, S) mask of valid tokens
-            ar_mask: (S,) autoregressive mask (all False for prefix)
+            ar_mask: (S,) starts of attention blocks (all False in joint mode)
+        """
+        context = self.prepare_condition_context(obs)
+        return context.prefix_tokens, context.prefix_valid, context.prefix_block_mask
+
+    def prepare_condition_context(self, obs: model.Observation) -> ConditionContext:
+        """Encode images once, applying role once before either goal route.
+
+        Pure AE routing keeps a zero, invalid third prefix slot while preserving
+        the real goal memory and its independent validity for cross-attention.
         """
         tokens = []
         input_mask = []
         ar_mask = []
+        goal_image_index = None
+        goal_tokens = goal_valid = None
+        gift_features = {}
+        gift_observation_index = None
 
         # Embed images through SigLIP in IMAGE_KEYS order (not dict iteration
         # order). Official OpenPI preprocess rebuilds cameras this way, then
         # concatenates ``list(observation.images.values())``.
         image_names = [name for name in model.IMAGE_KEYS if name in obs.images]
         image_names.extend(name for name in obs.images if name not in model.IMAGE_KEYS)
+        if (
+            self.goal_role_embedding is not None
+            or self._config.goal_cross_attention_layers
+            or not self._config.goal_in_prefix
+            or self._config.goal_prefix_mode != "joint"
+        ) and "right_wrist_0_rgb" not in obs.images:
+            raise ValueError("Goal conditioning requires the third goal-image slot.")
         for name in image_names:
-            image_tokens, _ = self.img(obs.images[name])  # (B, num_patches, width)
-            tokens.append(image_tokens)
-
-            # Image tokens use bidirectional attention
-            input_mask.append(
-                einops.repeat(
-                    obs.image_masks[name], "b -> b s", s=image_tokens.shape[1]
+            if self.gift is not None and name in {"base_0_rgb", "right_wrist_0_rgb"}:
+                image_tokens, features = self.img(
+                    obs.images[name], return_features=True
                 )
+                gift_features[name] = features
+                if name == "base_0_rgb":
+                    gift_observation_index = len(tokens)
+            else:
+                image_tokens, _ = self.img(obs.images[name])  # (B, num_patches, width)
+            if self.goal_role_embedding is not None and name == "right_wrist_0_rgb":
+                role = self.goal_role_embedding.to(dtype=image_tokens.dtype)
+                valid = obs.image_masks[name][:, None, None].to(image_tokens.dtype)
+                image_tokens = image_tokens + valid * role
+            image_valid = einops.repeat(
+                obs.image_masks[name], "b -> b s", s=image_tokens.shape[1]
             )
+            if name == "right_wrist_0_rgb":
+                goal_image_index = len(tokens)
+                if self._config.goal_cross_attention_layers:
+                    goal_tokens, goal_valid = image_tokens, image_valid
+                if not self._config.goal_in_prefix:
+                    image_tokens = torch.zeros_like(image_tokens)
+                    image_valid = torch.zeros_like(image_valid)
+            tokens.append(image_tokens)
+            input_mask.append(image_valid)
             ar_mask += [False] * image_tokens.shape[1]
+
+        if self.gift is not None:
+            if gift_observation_index is None:
+                raise ValueError("GIFT requires the base_0_rgb observation view.")
+            tokens[gift_observation_index] = self.gift(
+                tokens[gift_observation_index],
+                gift_features["base_0_rgb"],
+                gift_features["right_wrist_0_rgb"],
+                obs.image_masks["base_0_rgb"] & obs.image_masks["right_wrist_0_rgb"],
+            )
+
+        if self._config.goal_prefix_mode != "joint":
+            # Figure 19 of pi0.7: observations, causal text, bidirectional
+            # goal block. Reverse mode swaps the two image blocks around text.
+            if goal_image_index is None:
+                raise ValueError("pi07-style prefixes require a goal image")
+            goal = (tokens.pop(goal_image_index), input_mask.pop(goal_image_index))
+            if not tokens:
+                raise ValueError("pi07-style prefixes require observation images")
+            observations = (torch.cat(tokens, dim=1), torch.cat(input_mask, dim=1))
+            first, last = (
+                (observations, goal)
+                if self._config.goal_prefix_mode == "pi07_style"
+                else (goal, observations)
+            )
+            tokens, input_mask = [first[0]], [first[1]]
+            ar_mask = [False] * first[0].shape[1]
+            if obs.tokenized_prompt is not None:
+                text = self.llm.embed(obs.tokenized_prompt)
+                tokens.append(text)
+                input_mask.append(obs.tokenized_prompt_mask)
+                ar_mask += [True] * text.shape[1]
+            tokens.append(last[0])
+            input_mask.append(last[1])
+            ar_mask += [True] + [False] * (last[0].shape[1] - 1)
+            prefix = torch.cat(tokens, dim=1)
+            return ConditionContext(
+                prefix,
+                torch.cat(input_mask, dim=1),
+                torch.tensor(ar_mask, dtype=torch.bool, device=prefix.device),
+                goal_tokens,
+                goal_valid,
+            )
 
         # Add language tokens
         if obs.tokenized_prompt is not None:
@@ -248,7 +447,7 @@ class Pi0(model.BaseModel):
         tokens = torch.cat(tokens, dim=1)
         input_mask = torch.cat(input_mask, dim=1)
         ar_mask = torch.tensor(ar_mask, device=tokens.device)
-        return tokens, input_mask, ar_mask
+        return ConditionContext(tokens, input_mask, ar_mask, goal_tokens, goal_valid)
 
     def embed_suffix(
         self,
@@ -357,7 +556,9 @@ class Pi0(model.BaseModel):
         # Preprocess first (requires float32 for image ops), then cast the
         # observation to embed_dtype for Gemma / SigLIP. Keep actions in
         # fp32 like the RL sampler: action / time projections stay fp32.
-        observation = model.preprocess_observation(observation, train=train, rng=rng)
+        observation = model.preprocess_observation(
+            observation, train=train and self._config.image_augmentation, rng=rng
+        )
 
         observation = model._observation_to_dtype(observation, self.embed_dtype)
         actions = actions.to(dtype=torch.float32)
@@ -386,7 +587,8 @@ class Pi0(model.BaseModel):
         u_t = noise - actions
 
         # One forward pass for prefix + suffix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        context = self.prepare_condition_context(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = context[:3]
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
             observation, x_t, time
         )
@@ -401,6 +603,9 @@ class Pi0(model.BaseModel):
             positions=positions,
             mask=attn_mask,
             adarms_cond=[None, adarms_cond],
+            goal_tokens=context.goal_tokens,
+            goal_valid=context.goal_valid,
+            return_prefix=False,
         )[0]
 
         v_t = self.velocity_from_suffix(suffix_out[:, -self.action_horizon :])
@@ -409,7 +614,7 @@ class Pi0(model.BaseModel):
 
     def build_prefix_cache(
         self, observation: model.Observation
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple | GoalPrefixCache]:
         """Embed prefix tokens and run one LLM pass to build the KV cache.
 
         The caller is responsible for preprocessing the observation (image
@@ -420,9 +625,11 @@ class Pi0(model.BaseModel):
         Returns:
             prefix_out:  (B, prefix_len, paligemma_width) paligemma-side hidden states.
             prefix_mask: (B, prefix_len) bool mask of valid prefix positions.
-            kv_cache:    per-layer KV cache to feed into subsequent suffix passes.
+            kv_cache: per-layer KV, plus explicit goal memory when enabled.
+                Pass this unchanged to run_suffix; do not retain across updates.
         """
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        context = self.prepare_condition_context(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = context[:3]
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = torch.cumsum(prefix_mask.int(), dim=1) - 1
         outputs, kv_cache = self.llm(
@@ -430,6 +637,10 @@ class Pi0(model.BaseModel):
             positions=positions,
             mask=prefix_attn_mask,
         )
+        if context.goal_tokens is not None:
+            kv_cache = GoalPrefixCache(
+                kv_cache, context.goal_tokens, context.goal_valid
+            )
         return outputs[0], prefix_mask, kv_cache
 
     def run_suffix(
@@ -437,7 +648,7 @@ class Pi0(model.BaseModel):
         observation: model.Observation,
         x_t: torch.Tensor,
         t_tensor: torch.Tensor,
-        kv_cache: tuple,
+        kv_cache: tuple | GoalPrefixCache,
         prefix_mask: torch.Tensor,
     ) -> torch.Tensor:
         """One suffix forward pass (action expert) given the prefix KV cache.
@@ -445,6 +656,13 @@ class Pi0(model.BaseModel):
         Returns the action-expert hidden states sliced to the last
         ``action_horizon`` positions: (B, action_horizon, action_expert_width).
         """
+        goal_tokens = goal_valid = None
+        if isinstance(kv_cache, GoalPrefixCache):
+            kv_cache, goal_tokens, goal_valid = kv_cache
+        elif self._config.goal_cross_attention_layers:
+            raise ValueError(
+                "Goal attention requires the complete cache returned by build_prefix_cache"
+            )
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
             observation, x_t, t_tensor
         )
@@ -463,6 +681,8 @@ class Pi0(model.BaseModel):
             mask=full_attn_mask,
             kv_cache=kv_cache,
             adarms_cond=[None, adarms_cond],
+            goal_tokens=goal_tokens,
+            goal_valid=goal_valid,
         )
         # Official PI0Pytorch casts suffix hidden states to fp32 before
         # ``action_out_proj`` / the value head.
@@ -486,9 +706,13 @@ class Pi0(model.BaseModel):
         if precision == "bfloat16":
             self.llm.to(dtype=torch.bfloat16)
             self.img.to(dtype=torch.bfloat16)
+            if self.gift is not None:
+                self.gift.float()
         elif precision == "float32":
             self.llm.to(dtype=torch.float32)
             self.img.to(dtype=torch.float32)
+            if self.gift is not None:
+                self.gift.float()
             return
         else:
             raise ValueError(f"Invalid precision: {precision}")
@@ -633,6 +857,8 @@ class Pi0(model.BaseModel):
             "Embedder",
             "SigLIPViT",
         ]
+        if self.gift is not None:
+            names.append("GoalFeatureInjection")
         if self.rlt_cfg.use_rlt:
             names.append("RLTSelfAttentionLayer")
         return names
@@ -782,7 +1008,9 @@ class Pi0(model.BaseModel):
         batch_size = actions.shape[0]
         device = actions.device
 
-        observation = model.preprocess_observation(observation, train=True)
+        observation = model.preprocess_observation(
+            observation, train=self._config.image_augmentation
+        )
         observation = model._observation_to_dtype(observation, self.embed_dtype)
         actions = actions.to(dtype=torch.float32)
         dtype = actions.dtype
@@ -798,7 +1026,8 @@ class Pi0(model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        context = self.prepare_condition_context(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = context[:3]
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
             observation, x_t, time
         )
@@ -813,6 +1042,8 @@ class Pi0(model.BaseModel):
             positions=positions,
             mask=attn_mask,
             adarms_cond=[None, adarms_cond],
+            goal_tokens=context.goal_tokens,
+            goal_valid=context.goal_valid,
         )[0]
         v_t = self.velocity_from_suffix(suffix_out[:, -self.action_horizon :])
         loss = torch.square(v_t - u_t)
@@ -826,6 +1057,8 @@ class Pi0(model.BaseModel):
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         """Flow-matching SFT loss. Shared by SFT, DAgger, and PPO co-train."""
         del kwargs
+        # Preserve the established SFT runtime. Direct compute_loss also supports
+        # both checkpoint implementations when explicitly enabled by its caller.
         if hasattr(self, "gradient_checkpointing_disable"):
             self.gradient_checkpointing_disable()
         observation, actions = self._unpack_sft_batch(data)
@@ -846,6 +1079,21 @@ class Pi0(model.BaseModel):
             "rlt_loss": rlt_loss,
         }
 
+    def configure_gift_training(self) -> None:
+        """Apply the configured GIFT trainable subset after checkpoint loading.
+
+        ``adapter_expert`` trains GIFT and the full action expert including its
+        projections/time MLPs. ``adapter_head`` trains GIFT and action_out_proj.
+        Both keep autograd through Gemma so the injected tokens receive gradients.
+        """
+        if self.gift is None or self._config.gift_train_mode == "full":
+            return
+        self.freeze_vlm(
+            freeze_action_expert=self._config.gift_train_mode == "adapter_head"
+        )
+        self.gift.requires_grad_(True)
+        self.action_out_proj.requires_grad_(True)
+
     def freeze_vlm(self, freeze_action_expert: bool = False) -> int:
         """Freeze PaliGemma (vision + LLM expert-0). Optionally freeze expert-1.
 
@@ -853,6 +1101,12 @@ class Pi0(model.BaseModel):
         """
         self.img.eval()
         frozen = 0
+        if (
+            self.goal_role_embedding is not None
+            and self.goal_role_embedding.requires_grad
+        ):
+            self.goal_role_embedding.requires_grad = False
+            frozen += 1
         for p in self.img.parameters():
             if p.requires_grad:
                 p.requires_grad = False
@@ -864,6 +1118,11 @@ class Pi0(model.BaseModel):
                 frozen += 1
         expert_ids = (0, 1) if freeze_action_expert else (0,)
         for block in llm.layers:
+            if freeze_action_expert and block.goal_attention is not None:
+                for p in block.goal_attention.parameters():
+                    if p.requires_grad:
+                        p.requires_grad = False
+                        frozen += 1
             for expert_id in expert_ids:
                 for sub in (
                     block.pre_attention_norms[expert_id],

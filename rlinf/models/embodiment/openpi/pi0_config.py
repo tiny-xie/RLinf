@@ -37,8 +37,98 @@ class Pi0Config:
     pi05: bool = False
     discrete_state_input: bool | None = None
     pcd: bool = False
+    # Disable training image augmentation to preserve the full 224x224 view.
+    image_augmentation: bool = True
+    # Identify LIBERO goal-image tokens in the third image slot.
+    use_goal_role_embedding: bool = False
+    # Keep the third image as a physical slot, but mask/zero it for pure AE goals.
+    goal_in_prefix: bool = True
+    # Joint prefix, or block-causal image/text/image ordering inspired by pi0.7.
+    goal_prefix_mode: str = "joint"
+    # Empty disables the independent Action Expert goal attention.
+    goal_cross_attention_layers: tuple[int, ...] = ()
+    goal_cross_attention_num_heads: int = 8
+    goal_cross_attention_num_kv_heads: int = 1
+    goal_cross_attention_head_dim: int = 64
+    goal_cross_attention_seed: int = 0
+    goal_cross_attention_expected_depth: int = 18
+    # GIFT changes the main-view tokens; it does not append goal tokens to Gemma.
+    goal_injection_mode: str = "none"
+    gift_use_difference: bool = True
+    # Full SFT, or train the adapter with the AE / only its output projection.
+    gift_train_mode: str = "full"
 
     def __post_init__(self):
+        if self.goal_injection_mode not in {"none", "gift"}:
+            raise ValueError(
+                f"Unknown goal_injection_mode: {self.goal_injection_mode!r}"
+            )
+        if self.gift_train_mode not in {"full", "adapter_expert", "adapter_head"}:
+            raise ValueError(f"Unknown gift_train_mode: {self.gift_train_mode!r}")
+        if self.goal_injection_mode == "none" and self.gift_train_mode != "full":
+            raise ValueError("gift_train_mode requires goal_injection_mode='gift'")
+        if self.goal_injection_mode == "gift" and (
+            not self.pi05
+            or self.pcd
+            or self.image_augmentation
+            or self.goal_in_prefix
+            or self.goal_prefix_mode != "joint"
+            or self.use_goal_role_embedding
+            or self.goal_cross_attention_layers
+        ):
+            raise ValueError(
+                "GIFT requires pi05=True, image_augmentation=False, "
+                "goal_in_prefix=False, goal_prefix_mode='joint', no goal role/B attention, "
+                "and pcd=False."
+            )
+        if self.goal_prefix_mode not in {
+            "joint",
+            "pi07_style",
+            "pi07_style_reverse",
+        }:
+            raise ValueError(f"Unknown goal_prefix_mode: {self.goal_prefix_mode!r}")
+        if self.goal_prefix_mode != "joint" and (
+            not self.goal_in_prefix or not self.pi05 or self.pcd
+        ):
+            raise ValueError(
+                "pi07-style prefixes require goal_in_prefix=True, pi05=True and pcd=False"
+            )
+        self.goal_cross_attention_layers = tuple(self.goal_cross_attention_layers)
+        layers = self.goal_cross_attention_layers
+        if len(set(layers)) != len(layers) or any(
+            type(i) is not int or i < 0 for i in layers
+        ):
+            raise ValueError(
+                "goal_cross_attention_layers must contain distinct nonnegative integers"
+            )
+        if layers:
+            depths = [
+                gemma.get_config(v).depth
+                for v in (self.paligemma_variant, self.action_expert_variant)
+            ]
+            if depths != [self.goal_cross_attention_expected_depth] * 2:
+                raise ValueError(
+                    f"Goal attention expects {self.goal_cross_attention_expected_depth} layers in both experts, got {depths}"
+                )
+            if max(layers) >= depths[0]:
+                raise ValueError(
+                    f"Goal attention layer index must be below {depths[0]}"
+                )
+            if not self.pi05:
+                raise ValueError(
+                    "Independent goal attention currently requires pi05=True"
+                )
+        if (
+            min(
+                self.goal_cross_attention_num_heads,
+                self.goal_cross_attention_num_kv_heads,
+                self.goal_cross_attention_head_dim,
+            )
+            < 1
+            or self.goal_cross_attention_num_heads
+            % self.goal_cross_attention_num_kv_heads
+        ):
+            raise ValueError("Invalid goal attention head dimensions")
         if self.pi05 and self.max_token_len == 48:
             object.__setattr__(self, "max_token_len", 200)
         if self.discrete_state_input is None:

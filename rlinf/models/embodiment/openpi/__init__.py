@@ -48,6 +48,40 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
     from rlinf.models.embodiment.openpi.pi0_config import Pi0Config
 
     model_cfg = cfg.openpi
+    goal_in_prefix = bool(OmegaConf.select(model_cfg, "goal_in_prefix", default=True))
+    goal_prefix_mode = str(
+        OmegaConf.select(model_cfg, "goal_prefix_mode", default="joint")
+    )
+    goal_layers = tuple(
+        OmegaConf.select(model_cfg, "goal_cross_attention_layers", default=[])
+    )
+    goal_injection_mode = str(
+        OmegaConf.select(model_cfg, "goal_injection_mode", default="none")
+    )
+    extended_goal = (
+        bool(goal_layers)
+        or not goal_in_prefix
+        or goal_prefix_mode != "joint"
+        or goal_injection_mode != "none"
+    )
+    use_goal_role_embedding = bool(
+        OmegaConf.select(model_cfg, "use_goal_role_embedding", default=False)
+    )
+    if use_goal_role_embedding and (
+        not OmegaConf.select(cfg, "openpi_data.use_goal_image", default=False)
+        or OmegaConf.select(model_cfg, "num_images_in_input", default=2) != 3
+    ):
+        raise ValueError(
+            "openpi.use_goal_role_embedding requires openpi_data.use_goal_image=True "
+            "and openpi.num_images_in_input=3."
+        )
+    if extended_goal and (
+        not OmegaConf.select(cfg, "openpi_data.use_goal_image", default=False)
+        or OmegaConf.select(model_cfg, "num_images_in_input", default=2) != 3
+    ):
+        raise ValueError(
+            "Goal routing requires openpi_data.use_goal_image=True and openpi.num_images_in_input=3."
+        )
     set_torch_compile(bool(OmegaConf.select(model_cfg, "torch_compile", default=True)))
     # Existing Pi0.5 templates predate the explicit switch, so preserve their
     # behavior by default. Pi0 templates set this field to False explicitly.
@@ -91,7 +125,31 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
         "action_expert_variant": str(model_cfg.action_expert_variant),
         "dtype": _pi0_dtype_name(target_dtype),
         "pcd": False,
+        "image_augmentation": bool(
+            OmegaConf.select(model_cfg, "image_augmentation", default=True)
+        ),
+        "use_goal_role_embedding": use_goal_role_embedding,
+        "goal_in_prefix": goal_in_prefix,
+        "goal_prefix_mode": goal_prefix_mode,
+        "goal_cross_attention_layers": goal_layers,
+        "goal_injection_mode": goal_injection_mode,
+        "gift_use_difference": bool(
+            OmegaConf.select(model_cfg, "gift_use_difference", default=True)
+        ),
+        "gift_train_mode": str(
+            OmegaConf.select(model_cfg, "gift_train_mode", default="full")
+        ),
     }
+    for name in (
+        "goal_cross_attention_num_heads",
+        "goal_cross_attention_num_kv_heads",
+        "goal_cross_attention_head_dim",
+        "goal_cross_attention_seed",
+        "goal_cross_attention_expected_depth",
+    ):
+        value = OmegaConf.select(model_cfg, name, default=None)
+        if value is not None:
+            pi0_kwargs[name] = int(value)
     discrete_state_input = OmegaConf.select(
         model_cfg, "discrete_state_input", default=None
     )
@@ -111,6 +169,16 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
 
     task = OmegaConf.select(model_cfg, "task", default="sft")
     task = str(task).lower() if task is not None else "sft"
+    if extended_goal and (
+        task not in {"sft", "eval"}
+        or rlt_cfg.use_rlt
+        or OmegaConf.select(cfg, "is_lora", default=False)
+        or "lora" in pi0_config.paligemma_variant
+        or "lora" in pi0_config.action_expert_variant
+    ):
+        raise ValueError(
+            "Goal routing currently supports native PyTorch full SFT and eval without RLT/LoRA."
+        )
 
     if task == "sft":
         model = Pi0(
@@ -248,9 +316,16 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
             full_weights_path,
             expect_rlt=task in ("sft", "eval")
             and bool(OmegaConf.select(model_cfg, "use_rlt", default=False)),
+            allow_missing_goal_role=task != "eval",
+            allow_initialize_gift=task == "sft" and goal_injection_mode == "gift",
         )
     elif safetensors_path is not None:
-        load_base_safetensors(model, safetensors_path)
+        load_base_safetensors(
+            model,
+            safetensors_path,
+            allow_missing_goal_role=task != "eval",
+            allow_missing_goal_attention=task == "sft",
+        )
 
     _freeze_after_load(model, task)
     _apply_openpi_param_dtypes(model, target_dtype)
@@ -274,6 +349,14 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
 
 def _freeze_after_load(model, task: str) -> None:
     """Freeze after weights load so ``requires_grad`` is the post-load truth."""
+    if task == "sft" and getattr(model, "gift", None) is not None:
+        model.configure_gift_training()
+        logger.info(
+            "openpi[sft]: GIFT training mode=%s, trainable parameters=%d",
+            model._config.gift_train_mode,
+            sum(p.numel() for p in model.parameters() if p.requires_grad),
+        )
+        return
     if task == "rl" and getattr(model, "rl_cfg", None) is not None:
         if model.rl_cfg.train_expert_only:
             frozen = model.freeze_vlm()

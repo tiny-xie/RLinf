@@ -237,15 +237,18 @@ class SigLIPViT(nn.Module):
             self._pos_emb_cache[key] = pe
         return self._pos_emb_cache[key].to(dtype=dtype, device=device)
 
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, image: torch.Tensor, *, return_features: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass.
 
         Args:
             image: (B, H, W, 3) in [-1, 1] float32
+            return_features: Also return features before the output projector.
 
         Returns:
             tokens: (B, num_patches, width) - all patch tokens when pool_type="none"
-            _: placeholder for compatibility (None)
+            features: pre-projector features when requested, otherwise None
         """
         # --- Stem + pos_embed in float32 (matching JAX) ---
         # image is (B, H, W, C) -> (B, C, H, W)
@@ -281,11 +284,12 @@ class SigLIPViT(nn.Module):
             x = x[:, 0]
         # pool_type == "none": keep all tokens
 
+        features = x if return_features else None
         # Apply output head projection (no tanh — JAX num_classes head doesn't apply activation)
         if self.head is not None:
             x = self.head(x)
 
-        return x, None
+        return x, features
 
 
 class MAPHead(nn.Module):

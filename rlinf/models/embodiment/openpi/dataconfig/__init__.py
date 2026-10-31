@@ -76,6 +76,24 @@ from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import 
 
 _CONFIGS = [
     TrainConfig(
+        name="pi05_robodojo",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=50, discrete_state_input=True
+        ),
+        # RoboDojo shares Aloha's keys, but not its joint/gripper calibration.
+        data=LeRobotAlohaDataConfig(
+            repo_id="RoboDojo_lerobot_v21_video",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(asset_id="pi05_robodojo_v21"),
+            adapt_to_pi=False,
+            extra_delta_transform=True,
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        batch_size=256,
+        num_workers=4,
+        num_train_steps=29_000,
+    ),
+    TrainConfig(
         name="pi0_libero",
         model=pi0_config.Pi0Config(),
         data=LeRobotLiberoDataConfig(

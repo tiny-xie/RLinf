@@ -18,6 +18,8 @@ import numpy as np
 from openpi import transforms
 from openpi.models import model as _model
 
+GOAL_IMAGE_PROMPT = "achieve the state shown in the goal image"
+
 
 def make_libero_example() -> dict:
     """Creates a random input example for the Libero policy."""
@@ -52,6 +54,22 @@ class LiberoInputs(transforms.DataTransformFn):
     # Determines which model will be used.
     # Do not change this for your own dataset.
     model_type: _model.ModelType
+    use_goal_image: bool = False
+    # None preserves the dataset/environment task instruction with goal images.
+    goal_image_prompt: str | None = GOAL_IMAGE_PROMPT
+
+    def __post_init__(self) -> None:
+        if (
+            self.use_goal_image
+            and self.goal_image_prompt is not None
+            and (
+                not isinstance(self.goal_image_prompt, str)
+                or not self.goal_image_prompt.strip()
+            )
+        ):
+            raise ValueError(
+                "goal_image_prompt must be a nonempty fixed instruction or None."
+            )
 
     def __call__(self, data: dict) -> dict:
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
@@ -67,6 +85,27 @@ class LiberoInputs(transforms.DataTransformFn):
         # right wrist image below.
         base_image = _parse_image(data["observation/image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
+        goal_image = None
+        if self.use_goal_image:
+            value = data.get("observation/goal_image")
+            if value is None:
+                raise ValueError(
+                    "LIBERO goal-image mode requires observation/goal_image. "
+                    "For inference, provide batched env_obs['goal_images']."
+                )
+            value = np.asarray(value)
+            if value.ndim != 3 or (value.shape[0] != 3 and value.shape[-1] != 3):
+                raise ValueError("Goal image must be RGB with shape HWC or CHW.")
+            if np.issubdtype(value.dtype, np.floating):
+                if not np.isfinite(value).all() or value.min() < 0 or value.max() > 1:
+                    raise ValueError(
+                        "Floating-point goal images must be finite in [0, 1]."
+                    )
+            elif value.dtype != np.uint8:
+                raise ValueError(
+                    "Goal image must be uint8 or floating-point in [0, 1]."
+                )
+            goal_image = _parse_image(value)
 
         # Create inputs dict. Do not change the keys in the dict below.
         inputs = {
@@ -74,15 +113,17 @@ class LiberoInputs(transforms.DataTransformFn):
             "image": {
                 "base_0_rgb": base_image,
                 "left_wrist_0_rgb": wrist_image,
-                # Pad any non-existent images with zero-arrays of the appropriate shape.
-                "right_wrist_0_rgb": np.zeros_like(base_image),
+                # The optional goal occupies the otherwise padded third image slot.
+                "right_wrist_0_rgb": goal_image
+                if self.use_goal_image
+                else np.zeros_like(base_image),
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
                 "left_wrist_0_rgb": np.True_,
                 # We only mask padding images for pi0 model, not pi0-FAST. Do not change this for your own dataset.
                 "right_wrist_0_rgb": np.True_
-                if self.model_type == _model.ModelType.PI0_FAST
+                if self.use_goal_image or self.model_type == _model.ModelType.PI0_FAST
                 else np.False_,
             },
         }
@@ -95,8 +136,14 @@ class LiberoInputs(transforms.DataTransformFn):
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
         # stored in "prompt"; the output dict always needs to have the key "prompt").
-        if "prompt" in data:
+        if self.use_goal_image and self.goal_image_prompt is not None:
+            inputs["prompt"] = self.goal_image_prompt
+        elif "prompt" in data:
             inputs["prompt"] = data["prompt"]
+        elif self.use_goal_image:
+            raise ValueError(
+                "goal_image_prompt=None requires a dataset/environment prompt."
+            )
 
         return inputs
 

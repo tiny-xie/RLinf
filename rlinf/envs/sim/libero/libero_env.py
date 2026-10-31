@@ -158,7 +158,40 @@ class LiberoEnv(gym.Env):
         self._generator_ordered = np.random.default_rng(seed=0)
         self.start_idx = 0
 
-        self.task_suite: Benchmark = get_benchmark_overridden(cfg.task_suite_name)()
+        self.custom_task_manifest = cfg.get("custom_task_manifest", None)
+        self.goal_image_enabled = bool(
+            OmegaConf.select(cfg, "goal_image.enabled", default=False)
+        )
+        if self.goal_image_enabled and OmegaConf.select(
+            cfg, "atomic_sequence.enabled", default=False
+        ):
+            raise ValueError(
+                "Choose goal_image or atomic_sequence evaluation, not both."
+            )
+        self.atomic_sequence_enabled = self.goal_image_enabled or bool(
+            OmegaConf.select(cfg, "atomic_sequence.enabled", default=False)
+        )
+        if self.atomic_sequence_enabled and (
+            not self.is_eval
+            or (not self.custom_task_manifest and not self.goal_image_enabled)
+            or get_libero_type() != "standard"
+            or self.auto_reset
+            or not self.ignore_terminations
+        ):
+            raise ValueError(
+                "Subgoal evaluation requires standard LIBERO (custom tasks for atomic_sequence) with "
+                "auto_reset=False and ignore_terminations=True."
+            )
+        if self.custom_task_manifest:
+            if get_libero_type() not in {"standard", "pro"}:
+                raise ValueError(
+                    "custom_task_manifest requires LIBERO_TYPE=standard or pro."
+                )
+            from rlinf.envs.sim.libero.custom_tasks import CustomTaskBenchmark
+
+            self.task_suite = CustomTaskBenchmark(self.custom_task_manifest)
+        else:
+            self.task_suite: Benchmark = get_benchmark_overridden(cfg.task_suite_name)()
 
         self._compute_total_num_group_envs()
         self.reset_state_ids_all = self.get_reset_state_ids_all()
@@ -211,6 +244,7 @@ class LiberoEnv(gym.Env):
             def env_fn(param=env_fn_param, _type_val=current_type_val):
                 os.environ["LIBERO_TYPE"] = _type_val
                 seed = param.pop("seed")
+                atomic_sequence = param.pop("atomic_sequence", None)
 
                 if _type_val in ["pro", "plus"]:
                     sys.path[:] = [p for p in sys.path if "opt/libero" not in p]
@@ -249,6 +283,25 @@ class LiberoEnv(gym.Env):
                     from libero.libero.envs import OffScreenRenderEnv as WorkerEnv
 
                 env = WorkerEnv(**param)
+                if atomic_sequence is not None:
+                    pick_place = atomic_sequence.pop("pick_place", None)
+                    if pick_place is not None:
+                        from rlinf.envs.sim.libero.pick_place_eval import (
+                            PickPlaceSequenceEnv,
+                        )
+
+                        env = PickPlaceSequenceEnv(
+                            env,
+                            subgoals=atomic_sequence["subgoals"],
+                            max_steps_per_subgoal=atomic_sequence[
+                                "max_steps_per_subgoal"
+                            ],
+                            **pick_place,
+                        )
+                    else:
+                        from rlinf.envs.sim.libero.atomic_eval import AtomicSequenceEnv
+
+                        env = AtomicSequenceEnv(env, **atomic_sequence)
                 env.seed(seed)
                 return env
 
@@ -315,11 +368,16 @@ class LiberoEnv(gym.Env):
             task = self.task_suite.get_task(self.task_ids[env_id])
             folder_name = task.problem_folder
             file_name = task.bddl_file
-            original_path = os.path.join(bddl_root, folder_name, file_name)
+            original_path = (
+                self.task_suite.get_task_bddl_file_path(self.task_ids[env_id])
+                if self.custom_task_manifest
+                else os.path.join(bddl_root, folder_name, file_name)
+            )
 
             final_path = original_path
 
-            if variant == "pro":
+            # A manifest already binds the exact BDDL and initial-state files.
+            if variant == "pro" and not self.custom_task_manifest:
                 pro_suffix = raw_suffix.replace(".bddl", "") if raw_suffix else None
 
                 valid_perts = ["_lan", "_object", "_swap", "_task"]
@@ -446,6 +504,117 @@ class LiberoEnv(gym.Env):
                     "seed": self.seed,
                 }
             )
+            if self.atomic_sequence_enabled:
+                from libero.libero.envs.bddl_utils import robosuite_parse_problem
+
+                from rlinf.envs.sim.libero.atomic_eval import validate_atomic_subgoals
+
+                native_goals = robosuite_parse_problem(final_path)["goal_state"]
+                if self.custom_task_manifest:
+                    subgoals = self.task_suite.get_task_subgoals(self.task_ids[env_id])
+                elif len(native_goals) == 1:
+                    subgoals = [
+                        {"prompt": task.language, "predicate": list(native_goals[0])}
+                    ]
+                else:
+                    raise ValueError(
+                        "Composite visual goals require a manifest with ordered subgoals."
+                    )
+                sequence_config = (
+                    "goal_image" if self.goal_image_enabled else "atomic_sequence"
+                )
+                env_fn_params[-1]["atomic_sequence"] = {
+                    "subgoals": subgoals,
+                    "max_steps_per_subgoal": OmegaConf.select(
+                        self.cfg,
+                        f"{sequence_config}.max_steps_per_subgoal",
+                        default=256,
+                    ),
+                    "instruction_mode": "atomic"
+                    if self.goal_image_enabled
+                    else OmegaConf.select(
+                        self.cfg, "atomic_sequence.instruction_mode", default="atomic"
+                    ),
+                }
+                validate_atomic_subgoals(
+                    **env_fn_params[-1]["atomic_sequence"],
+                    native_goals=native_goals,
+                )
+                if self.goal_image_enabled:
+                    goal_mode = OmegaConf.select(
+                        self.cfg, "goal_image.mode", default="terminal"
+                    )
+                    if goal_mode not in {"terminal", "g1"}:
+                        raise ValueError("goal_image.mode must be 'terminal' or 'g1'.")
+                    if goal_mode == "g1":
+                        if (
+                            not OmegaConf.select(
+                                self.cfg,
+                                "goal_image.refresh_on_stage_change",
+                                default=False,
+                            )
+                            or OmegaConf.select(self.cfg, "goal_image.robot_pose_path")
+                            or OmegaConf.select(
+                                self.cfg,
+                                "goal_image.reset_robot_between_subgoals",
+                                default=False,
+                            )
+                            or OmegaConf.select(
+                                self.cfg, "goal_image.pick_place.enabled", default=False
+                            )
+                        ):
+                            raise ValueError(
+                                "G1 requires stage refresh, without robot poses, homing or pick/place."
+                            )
+                        env_fn_params[-1]["atomic_sequence"]["goal_image_mode"] = (
+                            goal_mode
+                        )
+                    env_fn_params[-1]["atomic_sequence"].update(
+                        goal_image=True,
+                        goal_robot_pose_path=OmegaConf.select(
+                            self.cfg, "goal_image.robot_pose_path", default=None
+                        ),
+                        refresh_goal_images=bool(
+                            OmegaConf.select(
+                                self.cfg,
+                                "goal_image.refresh_on_stage_change",
+                                default=False,
+                            )
+                        ),
+                        reset_robot_between_subgoals=bool(
+                            OmegaConf.select(
+                                self.cfg,
+                                "goal_image.reset_robot_between_subgoals",
+                                default=False,
+                            )
+                        ),
+                    )
+                if self.goal_image_enabled and OmegaConf.select(
+                    self.cfg, "goal_image.pick_place.enabled", default=False
+                ):
+                    from rlinf.envs.sim.libero.pick_place_eval import (
+                        load_pick_place_templates,
+                    )
+
+                    pick_place = OmegaConf.to_container(
+                        self.cfg.goal_image.pick_place, resolve=True
+                    )
+                    pick_place.pop("enabled")
+                    if OmegaConf.select(
+                        self.cfg, "goal_image.robot_pose_path", default=None
+                    ) or OmegaConf.select(
+                        self.cfg,
+                        "goal_image.reset_robot_between_subgoals",
+                        default=False,
+                    ):
+                        raise ValueError(
+                            "Pick/place uses its own pose templates and requires homing disabled."
+                        )
+                    load_pick_place_templates(
+                        pick_place["template_path"],
+                        [tuple(x.lower() for x in g["predicate"]) for g in subgoals],
+                    )
+                    env_fn_params[-1]["atomic_sequence"]["pick_place"] = pick_place
             # LIBERO-PRO: use selected BDDL language (not original suite task.language)
             # and remember the perturbation folder for pruned_init loading.
             pert_folder = os.path.basename(os.path.dirname(os.path.abspath(final_path)))
@@ -620,7 +789,11 @@ class LiberoEnv(gym.Env):
         )
         # LIBERO-PRO: load pruned_init from the selected perturbation folder
         # (e.g. libero_object_task/), not the original suite folder.
-        if variant == "pro" and getattr(self, "_pert_init_folders", None):
+        if (
+            variant == "pro"
+            and not self.custom_task_manifest
+            and getattr(self, "_pert_init_folders", None)
+        ):
             import liberopro.liberopro as l_pro
 
             init_root = l_pro.get_libero_path("init_states")
@@ -751,6 +924,17 @@ class LiberoEnv(gym.Env):
         episode_info["reward"] = episode_info["return"] / np.maximum(
             episode_len_for_reward, 1
         )
+        if "pick_place_completed_stages" in infos:
+            completed = np.asarray(infos["pick_place_completed_stages"])
+            total = np.asarray(infos["pick_place_total_stages"])
+            episode_info["pick_place_completed_fraction"] = completed / total
+            episode_info["pick_completed_fraction"] = ((completed + 1) // 2) / (
+                total // 2
+            )
+            episode_info["place_completed_fraction"] = (completed // 2) / (total // 2)
+            episode_info["pick_place_timed_out"] = np.asarray(
+                infos["pick_place_timed_out"]
+            )
         infos["episode"] = to_tensor(episode_info)
         return infos
 
@@ -792,6 +976,15 @@ class LiberoEnv(gym.Env):
             "states": states,
             "task_descriptions": self.task_descriptions,
         }
+        if self.goal_image_enabled:
+            obs["goal_images"] = torch.from_numpy(
+                np.stack(
+                    [
+                        get_libero_image({"agentview_image": raw["goal_image"]})
+                        for raw in obs_list
+                    ]
+                )
+            )
         return obs
 
     def _reconfigure(self, reset_state_ids, env_idx):
@@ -858,6 +1051,11 @@ class LiberoEnv(gym.Env):
             )
         if self.current_raw_obs is None:
             self.current_raw_obs = [None] * self.num_envs
+        if self.atomic_sequence_enabled:
+            started = self.env.begin_atomic_sequence(id=env_idx)
+            self.task_descriptions = self.task_descriptions.copy()
+            for i, idx in enumerate(env_idx):
+                raw_obs[i], self.task_descriptions[idx] = started[i]
         for i, idx in enumerate(env_idx):
             self.current_raw_obs[idx] = raw_obs[i]
 
@@ -899,13 +1097,26 @@ class LiberoEnv(gym.Env):
             depth=depth,
         )
 
-    def step(self, actions=None, auto_reset=True, _skip_obs_wrap=False):
+    def step(
+        self,
+        actions=None,
+        auto_reset=True,
+        _skip_obs_wrap=False,
+        _resume_atomic_sequence=True,
+    ):
         """Step the environment with the given actions."""
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
 
+        if self.atomic_sequence_enabled and _resume_atomic_sequence:
+            self.env.resume_atomic_sequence()
+
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, info_lists = self.env.step(actions)
+        if self.atomic_sequence_enabled:
+            self.task_descriptions = [
+                info.pop("atomic_task_description") for info in info_lists
+            ]
         self.current_raw_obs = raw_obs
         infos = list_of_dict_to_dict_of_list(info_lists)
         truncations = self.elapsed_steps >= self.cfg.max_episode_steps
@@ -933,6 +1144,8 @@ class LiberoEnv(gym.Env):
     def chunk_step(self, chunk_actions):
         # chunk_actions: [num_envs, chunk_step, action_dim]
         chunk_size = chunk_actions.shape[1]
+        if self.atomic_sequence_enabled:
+            self.env.resume_atomic_sequence()
         obs_list = []
         infos_list = []
 
@@ -960,7 +1173,10 @@ class LiberoEnv(gym.Env):
                 actions = chunk_actions[:, i]
                 extracted_obs, step_reward, terminations, truncations, infos = (
                     self.step(
-                        actions, auto_reset=False, _skip_obs_wrap=not should_render
+                        actions,
+                        auto_reset=False,
+                        _skip_obs_wrap=not should_render,
+                        _resume_atomic_sequence=False,
                     )
                 )
                 obs_list.append(extracted_obs)

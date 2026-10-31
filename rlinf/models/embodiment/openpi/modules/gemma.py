@@ -431,6 +431,7 @@ class Block(nn.Module):
     ):
         super().__init__()
         self.configs = configs
+        self.goal_attention = None
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         if isinstance(adarms, bool):
@@ -463,6 +464,9 @@ class Block(nn.Module):
         positions: torch.Tensor,
         attn_mask: torch.Tensor,
         adarms_cond: list[torch.Tensor | None],
+        goal_tokens: torch.Tensor | None = None,
+        goal_valid: torch.Tensor | None = None,
+        skip_prefix_output: bool = False,
     ) -> tuple[list[torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass.
 
@@ -497,6 +501,14 @@ class Block(nn.Module):
             _gated_residual(x, y, gate)
             for x, y, gate in zip(xs, post_attn, gates, strict=True)
         ]
+
+        if self.goal_attention is not None and xs[1] is not None:
+            xs[1] = self.goal_attention(xs[1], goal_tokens, goal_valid)
+
+        # Final prefix outputs do not affect the action loss. Skipping them
+        # also avoids forwarding nested FSDP norms with no backward consumer.
+        if skip_prefix_output:
+            xs[0] = None
 
         # Pre-FFN norm
         out = []
@@ -576,6 +588,9 @@ class Module(nn.Module):
         adarms_cond: Sequence[torch.Tensor | None] | None = None,
         *,
         kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+        goal_tokens: torch.Tensor | None = None,
+        goal_valid: torch.Tensor | None = None,
+        return_prefix: bool = True,
     ) -> tuple[list[torch.Tensor | None], tuple[torch.Tensor, torch.Tensor]]:
         """Full transformer forward pass.
 
@@ -616,7 +631,30 @@ class Module(nn.Module):
         new_layer_kv_caches = []
         for i, layer in enumerate(self.layers):
             layer_kv = layer_kv_caches[i] if i < len(layer_kv_caches) else None
-            if self.gradient_checkpointing and self.training:
+            skip_prefix_output = not return_prefix and i == len(self.layers) - 1
+            if (
+                self.gradient_checkpointing
+                and self.training
+                and self.gradient_checkpointing_use_reentrant
+            ):
+                # Reentrant checkpoint only tracks top-level tensor inputs and
+                # outputs. Flatten expert lists and KV so both paths backpropagate.
+                flat_outputs = torch.utils.checkpoint.checkpoint(
+                    _checkpoint_block_flat,
+                    layer,
+                    positions,
+                    mask,
+                    len(xs),
+                    *xs,
+                    *adarms_cond,
+                    *(layer_kv if layer_kv is not None else (None, None)),
+                    goal_tokens,
+                    goal_valid,
+                    skip_prefix_output,
+                    use_reentrant=True,
+                )
+                xs, new_kv = list(flat_outputs[:-2]), tuple(flat_outputs[-2:])
+            elif self.gradient_checkpointing and self.training:
                 xs, new_kv = torch.utils.checkpoint.checkpoint(
                     layer,
                     xs,
@@ -624,10 +662,22 @@ class Module(nn.Module):
                     positions,
                     mask,
                     adarms_cond,
+                    goal_tokens,
+                    goal_valid,
+                    skip_prefix_output,
                     use_reentrant=self.gradient_checkpointing_use_reentrant,
                 )
             else:
-                xs, new_kv = layer(xs, layer_kv, positions, mask, adarms_cond)
+                xs, new_kv = layer(
+                    xs,
+                    layer_kv,
+                    positions,
+                    mask,
+                    adarms_cond,
+                    goal_tokens,
+                    goal_valid,
+                    skip_prefix_output,
+                )
             new_layer_kv_caches.append(new_kv)
 
         # Return the list of per-layer KV caches
@@ -643,6 +693,18 @@ class Module(nn.Module):
                 outputs.append(None)
 
         return outputs, kv_cache
+
+
+def _checkpoint_block_flat(layer, positions, mask, num_experts, *inputs):
+    """Expose every differentiable block input/output to reentrant autograd."""
+    xs = list(inputs[:num_experts])
+    conditions = list(inputs[num_experts : 2 * num_experts])
+    k, v, goal_tokens, goal_valid, skip_prefix_output = inputs[2 * num_experts :]
+    kv = (k, v) if k is not None else None
+    outputs, new_kv = layer(
+        xs, kv, positions, mask, conditions, goal_tokens, goal_valid, skip_prefix_output
+    )
+    return (*outputs, *new_kv)
 
 
 def _apply_rope_eager(

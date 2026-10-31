@@ -37,6 +37,14 @@ class EmbodiedEvalRunner:
         env: "EnvWorker",
         run_timer=None,
     ):
+        self.eval_rounds = cfg.runner.get("eval_rounds", 1)
+        if (
+            not isinstance(self.eval_rounds, int)
+            or isinstance(self.eval_rounds, bool)
+            or self.eval_rounds < 1
+        ):
+            raise ValueError("runner.eval_rounds must be a positive integer.")
+
         self.cfg = cfg
         self.rollout = rollout
         self.env = env
@@ -90,18 +98,23 @@ class EmbodiedEvalRunner:
         eval_metrics.update(rollout_metrics)
         return eval_metrics
 
-    def run(self):
+    def run(self) -> None:
+        """Run evaluation rounds and log each result before starting the next."""
         start_time = time.time()
-        eval_metrics = self.evaluate()
-        eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
-        self.logger.info(eval_metrics)
-        self.metric_logger.log(step=0, data=eval_metrics)
-        print_metrics_table(
-            step=0,
-            total_steps=1,
-            start_time=start_time,
-            metrics=eval_metrics,
-            log_path=self.metric_logger.log_path,
-        )
-
-        self.metric_logger.finish()
+        try:
+            for step in range(self.eval_rounds):
+                eval_metrics = self.evaluate()
+                eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                if self.eval_rounds > 1:
+                    eval_metrics["eval/round"] = step + 1
+                self.logger.info(eval_metrics)
+                self.metric_logger.log(step=step, data=eval_metrics)
+                print_metrics_table(
+                    step=step,
+                    total_steps=self.eval_rounds,
+                    start_time=start_time,
+                    metrics=eval_metrics,
+                    log_path=self.metric_logger.log_path,
+                )
+        finally:
+            self.metric_logger.finish()
